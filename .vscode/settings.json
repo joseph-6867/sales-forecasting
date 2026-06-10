@@ -1,0 +1,1 @@
+{"files.exclude": {"**/.git": false, "**/.gitignore": false, "**/.env": false, "**/.env.*": false, "**/__pycache__": true, "**/*.pyc": true, "**/.venv": true}}
