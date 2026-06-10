@@ -34,6 +34,29 @@ from frontend.dashboard import render_dashboard
 init_session()
 
 
+# Compatibility helpers for Streamlit query param and rerun APIs
+def _set_query_params(**params):
+    try:
+        # Newer API
+        return st.set_query_params(**params)
+    except Exception:
+        try:
+            # Older experimental API
+            return st.experimental_set_query_params(**params)
+        except Exception:
+            return None
+
+
+def _rerun():
+    try:
+        return st.experimental_rerun()
+    except Exception:
+        try:
+            return st.rerun()
+        except Exception:
+            return None
+
+
 def _handle_google_callback():
     params = st.query_params
     error_param = params.get("error")
@@ -51,12 +74,12 @@ def _handle_google_callback():
 
     if error:
         st.error(f"Google sign-in failed: {error}")
-        st.experimental_set_query_params()
+        _set_query_params()
         return
 
     if code:
         ok, result = auth_google_callback(code)
-        st.experimental_set_query_params()
+        _set_query_params()
         if ok and isinstance(result, dict) and result.get("user"):
             user = result["user"]
             token = result.get("session", {}).get("access_token")
@@ -67,7 +90,7 @@ def _handle_google_callback():
             st.session_state.role = user.get("role")
             st.session_state.jwt_token = token
             st.session_state.current_page = "dashboard"
-            st.experimental_rerun()
+            _rerun()
         else:
             error_message = result if isinstance(result, str) else result.get("message", "Google sign-in failed")
             st.error(f"Google sign-in failed: {error_message}")
@@ -86,12 +109,12 @@ def _handle_google_callback():
         st.session_state.role = user.get("role")
         st.session_state.jwt_token = token
         st.session_state.current_page = "dashboard"
-        st.experimental_set_query_params()
-        st.experimental_rerun()
+        _set_query_params()
+        _rerun()
     else:
         error_message = result if isinstance(result, str) else result.get("message", "Google sign-in failed")
         st.error(f"Google sign-in failed: {error_message}")
-        st.experimental_set_query_params()
+        _set_query_params()
 
 
 # ================================================================
