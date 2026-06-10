@@ -224,31 +224,8 @@ def _auth_page():
                 st.rerun()
 
             st.caption("Or sign in with Google instead of a password.")
-            # Try Supabase hosted OAuth first (preferred), fall back to manual Google flow
-            try:
-                from supabase import create_client
-                from config.settings import SUPABASE_URL, SUPABASE_ANON_KEY, GOOGLE_REDIRECT_URI
-
-                google_link = None
-                if SUPABASE_URL and SUPABASE_ANON_KEY:
-                    supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-                    try:
-                        resp = supabase.auth.sign_in_with_oauth({
-                            "provider": "google",
-                            "options": {"redirect_to": GOOGLE_REDIRECT_URI}
-                        })
-                        # Some clients return a dict with a redirect URL under 'url'
-                        if isinstance(resp, dict) and resp.get("url"):
-                            google_link = resp.get("url")
-                        else:
-                            google_link = resp
-                    except Exception:
-                        google_link = None
-
-                if not google_link:
-                    google_link = auth_google_login_url()
-            except Exception:
-                google_link = auth_google_login_url()
+            # Use the manual Google OAuth flow implemented in backend.auth
+            google_link = auth_google_login_url()
 
             st.markdown(
                 f"<a href='{google_link}' target='_self'>"
