@@ -94,6 +94,12 @@ def _handle_google_callback():
         else:
             error_message = result if isinstance(result, str) else result.get("message", "Google sign-in failed")
             st.error(f"Google sign-in failed: {error_message}")
+            # Show callback params to help diagnose redirect URI or flow mismatches
+            try:
+                st.info("Callback parameters received:")
+                st.json(params)
+            except Exception:
+                pass
         return
 
     if not token:

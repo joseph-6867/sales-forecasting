@@ -108,19 +108,28 @@ def _google_auth_url() -> str:
 
 
 def _google_user_info(code: str) -> Dict[str, Any]:
-    token_resp = requests.post(
-        "https://oauth2.googleapis.com/token",
-        data={
-            "code": code,
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "redirect_uri": GOOGLE_REDIRECT_URI,
-            "grant_type": "authorization_code",
-        },
-        timeout=10,
-    )
-    token_resp.raise_for_status()
-    token_data = token_resp.json()
+    try:
+        token_resp = requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+            timeout=10,
+        )
+        token_resp.raise_for_status()
+        token_data = token_resp.json()
+    except requests.HTTPError as http_err:
+        # Include response body to aid debugging (common cause: redirect_uri mismatch)
+        resp_text = None
+        try:
+            resp_text = token_resp.text
+        except Exception:
+            resp_text = str(http_err)
+        raise ValueError(f"Google token exchange failed: {http_err} - {resp_text}")
     access_token = token_data.get("access_token")
     if not access_token:
         raise ValueError("Google did not return an access token.")
