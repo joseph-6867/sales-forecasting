@@ -1,19 +1,32 @@
 # ================================================================
-# backend/auth.py  —  HTTP-Based JWT Authentication
+# backend/auth.py  —  Streamlit-native JWT Authentication
 # ================================================================
-# Communicates with backend/server.py (FastAPI) for auth operations.
-# Token issued by server is stored in Streamlit session state.
+# Uses Supabase for user storage and creates/verifies JWTs directly in the app.
+# This removes the need for a separate FastAPI auth server.
 # ================================================================
 
 import hashlib
 import re
 import uuid
-import streamlit as st
-import requests
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
-from config.settings import SHARED_EMAIL_BASE
+from urllib.parse import urlencode
 
-AUTH_SERVER_URL = "http://localhost:8000"
+import jwt
+import requests
+import streamlit as st
+
+from backend.database import db_get_user_by_email, db_upsert_user
+from config.settings import (
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    GOOGLE_REDIRECT_URI,
+    SHARED_EMAIL_BASE,
+    JWT_SECRET,
+)
+
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_HOURS = 24
 
 
 def _build_auth_payload(
@@ -37,7 +50,6 @@ def _build_auth_payload(
     if response is None:
         return payload
 
-    # Extract from response dict
     if isinstance(response, dict):
         payload["user"] = response.get("user")
         payload["session"] = {"access_token": response.get("token")} if response.get("token") else None
@@ -47,7 +59,7 @@ def _build_auth_payload(
 
 def _build_shared_email(account: str) -> str:
     if not SHARED_EMAIL_BASE or "@" not in SHARED_EMAIL_BASE:
-        raise ValueError("Shared email base is not configured. Set SHARED_EMAIL_BASE in .env.")
+        raise ValueError("Shared email base is not configured. Set SHARED_EMAIL_BASE in .env or Streamlit secrets.")
     local, domain = SHARED_EMAIL_BASE.split("@", 1)
     key = account.strip().lower().replace(" ", "_")
     key = re.sub(r"[^a-z0-9._+-]", "", key)
@@ -56,7 +68,110 @@ def _build_shared_email(account: str) -> str:
     return f"{local}+{key}@{domain}"
 
 
-# ── Session ───────────────────────────────────────────────────
+def _hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def _create_jwt(user_id: str, email: str, full_name: str, role: str) -> str:
+    expiry = datetime.utcnow() + timedelta(hours=JWT_EXPIRY_HOURS)
+    payload = {
+        "user_id": user_id,
+        "email": email,
+        "full_name": full_name,
+        "role": role,
+        "exp": expiry,
+        "iat": datetime.utcnow(),
+    }
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return token.decode("utf-8") if isinstance(token, bytes) else token
+
+
+def _decode_jwt(token: str) -> Optional[Dict[str, Any]]:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+        return None
+
+
+def _google_auth_url() -> str:
+    if not GOOGLE_CLIENT_ID or not GOOGLE_REDIRECT_URI:
+        raise ValueError("Google OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_REDIRECT_URI.")
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "access_type": "offline",
+        "prompt": "select_account",
+    }
+    return "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
+
+
+def _google_user_info(code: str) -> Dict[str, Any]:
+    token_resp = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "code": code,
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri": GOOGLE_REDIRECT_URI,
+            "grant_type": "authorization_code",
+        },
+        timeout=10,
+    )
+    token_resp.raise_for_status()
+    token_data = token_resp.json()
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise ValueError("Google did not return an access token.")
+
+    profile_resp = requests.get(
+        "https://www.googleapis.com/oauth2/v3/userinfo",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=10,
+    )
+    profile_resp.raise_for_status()
+    return profile_resp.json()
+
+
+def auth_google_login_url() -> str:
+    return _google_auth_url()
+
+
+def auth_google_callback(code: str):
+    try:
+        profile = _google_user_info(code)
+        email = profile.get("email", "").lower()
+        full_name = profile.get("name") or email.split("@")[0]
+        if not email:
+            return False, _build_auth_payload(None, "Google did not return an email.", success=False)
+
+        user = db_get_user_by_email(email)
+        if not user:
+            user_id = str(uuid.uuid4())
+            success, db_error = db_upsert_user(
+                user_id,
+                email,
+                full_name,
+                "analyst",
+                password_hash=None,
+            )
+            if not success:
+                return False, _build_auth_payload(None, f"User create failed: {db_error}", success=False)
+            role = "analyst"
+        else:
+            user_id = user.get("id")
+            role = user.get("role", "analyst")
+
+        token = _create_jwt(user_id, email, full_name, role)
+        return True, _build_auth_payload(
+            {"user": {"id": user_id, "email": email, "full_name": full_name, "role": role}, "token": token},
+            "Google sign-in successful.",
+            success=True,
+        )
+    except Exception as e:
+        return False, _build_auth_payload(None, f"Google sign-in failed: {e}", success=False, raw_error=str(e))
+
 
 def init_session():
     defaults = {
@@ -65,7 +180,7 @@ def init_session():
         "email":         None,
         "full_name":     None,
         "role":          None,
-        "jwt_token":     None,   # JWT token from auth server
+        "jwt_token":     None,
         "current_page":  "home",
         "active_project":None,
         "active_df":     None,
@@ -128,17 +243,13 @@ def is_admin():
 
 
 def get_auth_headers():
-    """Get headers with JWT token for API requests."""
     token = st.session_state.get("jwt_token")
     if token:
         return {"Authorization": f"Bearer {token}"}
     return {}
 
 
-# ── Auth Actions ──────────────────────────────────────────────
-
 def auth_register(account, password, username, role="analyst"):
-    """Register new user via HTTP auth server."""
     if len(password) < 6:
         return False, _build_auth_payload(None, "Password must be at least 6 characters.", success=False)
     try:
@@ -146,91 +257,68 @@ def auth_register(account, password, username, role="analyst"):
         if not account:
             return False, _build_auth_payload(None, "Please enter an account name or email.", success=False)
 
-        # Call auth server
-        response = requests.post(
-            f"{AUTH_SERVER_URL}/auth/register",
-            json={
-                "account": account,
-                "password": password,
-                "full_name": username,
-                "role": role,
-            },
-            timeout=10,
-        )
-
-        if response.status_code != 200:
-            error_data = response.json()
-            error_msg = error_data.get("detail", "Registration failed")
-            return False, _build_auth_payload(None, error_msg, success=False, raw_error=error_msg)
-
-        data = response.json()
-        if data.get("success"):
-            user = data.get("user")
-            token = data.get("token")
-            return True, _build_auth_payload(
-                {"user": user, "token": token},
-                data.get("message"),
-                success=True,
-            )
+        if "@" in account:
+            email = account.lower()
         else:
-            return False, _build_auth_payload(None, data.get("message", "Registration failed"), success=False)
+            email = _build_shared_email(account)
 
-    except requests.exceptions.ConnectionError:
-        return False, _build_auth_payload(None, "Auth server unavailable. Is it running on port 8000?", success=False, raw_error="Connection failed")
-    except requests.exceptions.Timeout:
-        return False, _build_auth_payload(None, "Auth server request timed out.", success=False, raw_error="Timeout")
+        existing = db_get_user_by_email(email)
+        if existing:
+            return False, _build_auth_payload(None, "Account already registered. Please log in.", success=False)
+
+        user_id = str(uuid.uuid4())
+        password_hash = _hash_password(password)
+        success, db_error = db_upsert_user(user_id, email, username, role, password_hash=password_hash)
+        if not success:
+            return False, _build_auth_payload(None, f"Registration failed: {db_error}", success=False)
+
+        token = _create_jwt(user_id, email, username, role)
+        return True, _build_auth_payload(
+            {"user": {"id": user_id, "email": email, "full_name": username, "role": role}, "token": token},
+            f"Account created! Token issued for {email}",
+            success=True,
+        )
     except Exception as e:
         return False, _build_auth_payload(None, f"Registration error: {e}", success=False, raw_error=str(e))
 
 
 def auth_login(account, password):
-    """Login user via HTTP auth server."""
     try:
         account = account.strip()
         if not account:
             return False, _build_auth_payload(None, "Please enter account or email.", success=False)
 
-        # Call auth server
-        response = requests.post(
-            f"{AUTH_SERVER_URL}/auth/login",
-            json={
-                "account": account,
-                "password": password,
-            },
-            timeout=10,
-        )
-
-        if response.status_code != 200:
-            error_data = response.json()
-            error_msg = error_data.get("detail", "Login failed")
-            return False, _build_auth_payload(None, error_msg, success=False, raw_error=error_msg)
-
-        data = response.json()
-        if data.get("success"):
-            user = data.get("user")
-            token = data.get("token")
-            return True, _build_auth_payload(
-                {"user": user, "token": token},
-                data.get("message"),
-                success=True,
-            )
+        if "@" in account:
+            email = account.lower()
         else:
-            return False, _build_auth_payload(None, data.get("message", "Login failed"), success=False)
+            email = _build_shared_email(account)
 
-    except requests.exceptions.ConnectionError:
-        return False, _build_auth_payload(None, "Auth server unavailable. Is it running on port 8000?", success=False, raw_error="Connection failed")
-    except requests.exceptions.Timeout:
-        return False, _build_auth_payload(None, "Auth server request timed out.", success=False, raw_error="Timeout")
+        user = db_get_user_by_email(email)
+        if not user:
+            return False, _build_auth_payload(None, "Incorrect account or password.", success=False)
+
+        password_hash = _hash_password(password)
+        if user.get("password_hash") != password_hash:
+            return False, _build_auth_payload(None, "Incorrect account or password.", success=False)
+
+        user_id = user.get("id")
+        full_name = user.get("full_name") or email.split("@")[0]
+        role = user.get("role", "analyst")
+        token = _create_jwt(user_id, email, full_name, role)
+
+        return True, _build_auth_payload(
+            {"user": {"id": user_id, "email": email, "full_name": full_name, "role": role}, "token": token},
+            f"Welcome back, {full_name}! 👋",
+            success=True,
+        )
     except Exception as e:
         return False, _build_auth_payload(None, f"Login error: {e}", success=False, raw_error=str(e))
 
 
 def auth_forgot_password(account: str):
-    """Placeholder for password reset support."""
     if not account or not account.strip():
         return False, "Please enter an account name or email."
 
-    # TODO: implement password reset flow via auth server / email.
     return False, (
         "Password reset is not yet available. "
         "Please contact the administrator or register a new account."
@@ -238,27 +326,17 @@ def auth_forgot_password(account: str):
 
 
 def auth_verify_token(token: str):
-    """Verify a JWT token via auth server."""
-    try:
-        response = requests.get(
-            f"{AUTH_SERVER_URL}/auth/verify",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
-        )
-        if response.status_code != 200:
-            error_data = response.json()
-            return False, error_data.get("detail", "Token verification failed")
+    payload = _decode_jwt(token)
+    if not payload:
+        return False, "Token invalid or expired"
 
-        data = response.json()
-        if data.get("success"):
-            return True, {"user": data.get("user"), "token": token}
-        return False, data.get("message", "Token verification failed")
+    user = {
+        "id": payload.get("user_id"),
+        "email": payload.get("email"),
+        "full_name": payload.get("full_name"),
+        "role": payload.get("role"),
+    }
+    return True, _build_auth_payload({"user": user, "token": token}, "Token is valid", success=True)
 
-    except requests.exceptions.ConnectionError:
-        return False, "Auth server unavailable. Is it running on port 8000?"
-    except requests.exceptions.Timeout:
-        return False, "Auth server request timed out."
-    except Exception as e:
-        return False, f"Token verification error: {e}"
-
+...
 

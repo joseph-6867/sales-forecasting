@@ -7,19 +7,36 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+try:
+    import streamlit as st
+except Exception:
+    st = None
+
+
+def _env(key: str, default: str = "") -> str:
+    try:
+        if st is not None and hasattr(st, "secrets"):
+            if key in st.secrets:
+                return st.secrets[key]
+    except (FileNotFoundError, Exception):
+        pass
+    return os.getenv(key, default)
+
+
 # ── Supabase ──────────────────────────────────────────────────
-SUPABASE_URL              = os.getenv("SUPABASE_URL", "")
-SUPABASE_ANON_KEY         = os.getenv("SUPABASE_ANON_KEY", "")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_URL              = _env("SUPABASE_URL", "")
+SUPABASE_ANON_KEY         = _env("SUPABASE_ANON_KEY", "")
+SUPABASE_SERVICE_ROLE_KEY = _env("SUPABASE_SERVICE_ROLE_KEY", "")
 
 # ── App ───────────────────────────────────────────────────────
 APP_NAME              = os.getenv("APP_NAME", "Sales Forecasting Platform")
 APP_VERSION           = os.getenv("APP_VERSION", "1.0.0")
 DEBUG                 = os.getenv("DEBUG", "false").lower() == "true"
-SHARED_EMAIL_BASE     = os.getenv("SHARED_EMAIL_BASE", "")
-GOOGLE_CLIENT_ID      = os.getenv("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET  = os.getenv("GOOGLE_CLIENT_SECRET", "")
-GOOGLE_REDIRECT_URI   = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/google/callback")
+JWT_SECRET            = _env("JWT_SECRET", "dev-secret-key-change-in-production")
+SHARED_EMAIL_BASE     = _env("SHARED_EMAIL_BASE", "")
+GOOGLE_CLIENT_ID      = _env("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET  = _env("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REDIRECT_URI   = _env("GOOGLE_REDIRECT_URI", "http://localhost:8501")
 
 # ── ML ────────────────────────────────────────────────────────
 FORECAST_HORIZONS = {

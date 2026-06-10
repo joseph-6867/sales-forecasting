@@ -19,7 +19,16 @@ st.set_page_config(
     menu_items={"About": "# Sales Forecasting Platform v1.0"}
 )
 
-from backend.auth       import init_session, is_auth, auth_register, auth_login, auth_forgot_password, auth_verify_token
+from backend.auth import (
+    init_session,
+    is_auth,
+    auth_register,
+    auth_login,
+    auth_forgot_password,
+    auth_verify_token,
+    auth_google_login_url,
+    auth_google_callback,
+)
 from frontend.dashboard import render_dashboard
 
 init_session()
@@ -27,11 +36,43 @@ init_session()
 
 def _handle_google_callback():
     params = st.query_params
+    error_param = params.get("error")
+    code_param = params.get("code")
     token_param = params.get("token")
-    if isinstance(token_param, list):
-        token = token_param[0] if token_param else None
-    else:
-        token = token_param
+
+    def _first_value(value):
+        if isinstance(value, list):
+            return value[0] if value else None
+        return value
+
+    error = _first_value(error_param)
+    code = _first_value(code_param)
+    token = _first_value(token_param)
+
+    if error:
+        st.error(f"Google sign-in failed: {error}")
+        st.experimental_set_query_params()
+        return
+
+    if code:
+        ok, result = auth_google_callback(code)
+        st.experimental_set_query_params()
+        if ok and isinstance(result, dict) and result.get("user"):
+            user = result["user"]
+            token = result.get("session", {}).get("access_token")
+            st.session_state.authenticated = True
+            st.session_state.user_id = user.get("id")
+            st.session_state.email = user.get("email")
+            st.session_state.full_name = user.get("full_name")
+            st.session_state.role = user.get("role")
+            st.session_state.jwt_token = token
+            st.session_state.current_page = "dashboard"
+            st.experimental_rerun()
+        else:
+            error_message = result if isinstance(result, str) else result.get("message", "Google sign-in failed")
+            st.error(f"Google sign-in failed: {error_message}")
+        return
+
     if not token:
         return
 
@@ -45,12 +86,12 @@ def _handle_google_callback():
         st.session_state.role = user.get("role")
         st.session_state.jwt_token = token
         st.session_state.current_page = "dashboard"
-        st.query_params = {}
+        st.experimental_set_query_params()
         st.experimental_rerun()
     else:
         error_message = result if isinstance(result, str) else result.get("message", "Google sign-in failed")
         st.error(f"Google sign-in failed: {error_message}")
-        st.query_params = {}
+        st.experimental_set_query_params()
 
 
 # ================================================================
@@ -154,8 +195,9 @@ def _auth_page():
                 st.rerun()
 
             st.caption("Or sign in with Google instead of a password.")
+            google_link = auth_google_login_url()
             st.markdown(
-                "<a href='http://localhost:8000/auth/google/login' target='_self'>"
+                f"<a href='{google_link}' target='_self'>"
                 "<button style='width:100%;padding:10px;border-radius:6px;border:none;background:#4285F4;color:white;font-weight:600;'>"
                 "Sign in with Google"
                 "</button></a>",
