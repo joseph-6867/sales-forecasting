@@ -36,7 +36,9 @@ JWT_SECRET            = _env("JWT_SECRET", "dev-secret-key-change-in-production"
 SHARED_EMAIL_BASE     = _env("SHARED_EMAIL_BASE", "")
 GOOGLE_CLIENT_ID      = _env("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET  = _env("GOOGLE_CLIENT_SECRET", "")
-GOOGLE_REDIRECT_URI   = _env("GOOGLE_REDIRECT_URI", "https://deploy-financial66.streamlit.app/")
+# Normalize redirect URI: remove trailing slash to avoid exact-match mismatches
+_raw_google_redirect = _env("GOOGLE_REDIRECT_URI", "https://deploy-financial66.streamlit.app")
+GOOGLE_REDIRECT_URI   = _raw_google_redirect.rstrip('/')
 
 # ── ML ────────────────────────────────────────────────────────
 FORECAST_HORIZONS = {
