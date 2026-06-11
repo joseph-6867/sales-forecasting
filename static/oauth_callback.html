@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Signing you in...</title>
+  <style>
+    body { font-family: sans-serif; display: flex; align-items: center;
+           justify-content: center; height: 100vh; margin: 0;
+           background: #0f172a; color: #94a3b8; }
+    .box { text-align: center; }
+    .spinner { width: 40px; height: 40px; border: 3px solid #334155;
+               border-top-color: #6366f1; border-radius: 50%;
+               animation: spin 0.8s linear infinite; margin: 0 auto 16px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div class="spinner"></div>
+    <p>Completing sign-in, please wait...</p>
+  </div>
+  <script>
+    // This page is the OAuth redirect target.
+    // Supabase puts tokens in the URL fragment: #access_token=...
+    // We extract them here (top-level page, full access to window.location)
+    // and forward them to the Streamlit app as query params.
+
+    (function () {
+      var STREAMLIT_APP = "https://deploy-financial66.streamlit.app/";
+
+      // Parse the fragment
+      var hash = window.location.hash;
+      var params = {};
+
+      if (hash && hash.length > 1) {
+        hash.substring(1).split("&").forEach(function (part) {
+          var kv = part.split("=");
+          if (kv.length >= 2) {
+            params[decodeURIComponent(kv[0])] = decodeURIComponent(kv.slice(1).join("="));
+          }
+        });
+      }
+
+      // Also check query params (error cases come as ?error=...)
+      var search = window.location.search;
+      if (search && search.length > 1) {
+        search.substring(1).split("&").forEach(function (part) {
+          var kv = part.split("=");
+          if (kv.length >= 2) {
+            params[decodeURIComponent(kv[0])] = decodeURIComponent(kv.slice(1).join("="));
+          }
+        });
+      }
+
+      var qs = "?";
+
+      if (params["error"]) {
+        qs += "error=" + encodeURIComponent(params["error"]);
+        if (params["error_description"]) {
+          qs += "&error_description=" + encodeURIComponent(params["error_description"]);
+        }
+      } else if (params["access_token"]) {
+        qs += "st_access_token=" + encodeURIComponent(params["access_token"]);
+        if (params["refresh_token"]) {
+          qs += "&st_refresh_token=" + encodeURIComponent(params["refresh_token"]);
+        }
+      } else if (params["code"]) {
+        // PKCE code flow fallback
+        qs += "code=" + encodeURIComponent(params["code"]);
+      } else {
+        // Nothing useful — just go home
+        window.location.replace(STREAMLIT_APP);
+        return;
+      }
+
+      window.location.replace(STREAMLIT_APP + qs);
+    })();
+  </script>
+</body>
+</html>
