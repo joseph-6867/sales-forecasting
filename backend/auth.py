@@ -7,7 +7,6 @@ import streamlit as st
 from supabase import create_client, Client
 
 
-# ── Supabase client ──────────────────────────────────────────────
 def _get_supabase() -> Client:
     try:
         url = st.secrets.get("SUPABASE_URL", "") or os.environ.get("SUPABASE_URL", "")
@@ -15,16 +14,10 @@ def _get_supabase() -> Client:
     except Exception:
         url = os.environ.get("SUPABASE_URL", "")
         key = os.environ.get("SUPABASE_ANON_KEY", "")
-
     if not url or not key:
-        raise RuntimeError(
-            "Supabase credentials missing. "
-            "Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit Cloud secrets."
-        )
+        raise RuntimeError("Supabase credentials missing.")
     return create_client(url, key)
 
-
-# ── Session initialisation ───────────────────────────────────────
 
 def init_session():
     defaults = {
@@ -47,10 +40,7 @@ def is_auth() -> bool:
 
 
 def is_admin() -> bool:
-    return (
-        bool(st.session_state.get("authenticated")) and
-        st.session_state.get("role") == "admin"
-    )
+    return bool(st.session_state.get("authenticated")) and st.session_state.get("role") == "admin"
 
 
 def get_current_user() -> dict:
@@ -64,16 +54,13 @@ def get_current_user() -> dict:
     }
 
 
-# ── Session setter ───────────────────────────────────────────────
-
 def _set_session_from_supabase(user, session):
     meta = user.user_metadata if hasattr(user, "user_metadata") else {}
     st.session_state.authenticated  = True
     st.session_state.user_id        = user.id
     st.session_state.email          = user.email
     st.session_state.full_name      = (
-        meta.get("full_name") or
-        meta.get("name") or
+        meta.get("full_name") or meta.get("name") or
         (user.email.split("@")[0] if user.email else "User")
     )
     st.session_state.role           = meta.get("role", "analyst")
@@ -85,99 +72,74 @@ def _set_session_from_supabase(user, session):
     st.session_state.col_map        = {}
 
 
-# ── Email / Password auth ────────────────────────────────────────
+# ── Email / Password ─────────────────────────────────────────────
 
-def auth_register(email: str, password: str, full_name: str, role: str = "analyst"):
+def auth_register(email, password, full_name, role="analyst"):
     try:
-        supabase = _get_supabase()
-        res = supabase.auth.sign_up({
-            "email":    email,
-            "password": password,
-            "options":  {"data": {"full_name": full_name, "role": role}},
+        res = _get_supabase().auth.sign_up({
+            "email": email, "password": password,
+            "options": {"data": {"full_name": full_name, "role": role}},
         })
         if res.user:
             if res.session:
                 _set_session_from_supabase(res.user, res.session)
-                return True, {"message": "Account created successfully! Welcome 🎉", "auto_login": True}
-            else:
-                return True, {
-                    "message": "Account created! Check your email to confirm, then log in.",
-                    "auto_login": False,
-                }
-        return False, {"message": "Registration failed. Please try again.", "auto_login": False}
+                return True, {"message": "Account created! Welcome 🎉", "auto_login": True}
+            return True, {"message": "Account created! Check your email to confirm.", "auto_login": False}
+        return False, {"message": "Registration failed.", "auto_login": False}
     except Exception as e:
         msg = str(e)
         if "already registered" in msg.lower() or "duplicate" in msg.lower():
-            return False, {"message": "Email already registered. Please log in instead.", "auto_login": False}
+            return False, {"message": "Email already registered.", "auto_login": False}
         if "rate" in msg.lower():
-            import time
-            st.session_state["register_cooldown"] = time.time() + 60
-            return False, {"message": "Too many requests. Please wait 60 seconds.", "auto_login": False}
+            import time; st.session_state["register_cooldown"] = time.time() + 60
+            return False, {"message": "Too many requests. Wait 60 seconds.", "auto_login": False}
         return False, {"message": f"Registration error: {msg}", "auto_login": False}
 
 
-def auth_login(email: str, password: str):
+def auth_login(email, password):
     try:
-        supabase = _get_supabase()
-        res = supabase.auth.sign_in_with_password({
-            "email":    email,
-            "password": password,
-        })
+        res = _get_supabase().auth.sign_in_with_password({"email": email, "password": password})
         if res.user and res.session:
             meta = res.user.user_metadata or {}
             _set_session_from_supabase(res.user, res.session)
-            return True, {
-                "message": f"Welcome back, {meta.get('full_name', res.user.email)}!"
-            }
+            return True, {"message": f"Welcome back, {meta.get('full_name', res.user.email)}!"}
         return False, {"message": "Login failed. Check your credentials."}
     except Exception as e:
         msg = str(e)
-        if "email not confirmed" in msg.lower() or "not confirmed" in msg.lower():
-            return False, {"message": "Please confirm your email address first (check your inbox)."}
-        if "invalid" in msg.lower() or "credentials" in msg.lower() or "wrong" in msg.lower():
+        if "email not confirmed" in msg.lower():
+            return False, {"message": "Please confirm your email first."}
+        if "invalid" in msg.lower() or "credentials" in msg.lower():
             return False, {"message": "Invalid email or password."}
         return False, {"message": f"Login error: {msg}"}
 
 
-def auth_forgot_password(email: str):
+def auth_forgot_password(email):
     try:
-        supabase = _get_supabase()
-        site_url = _get_site_url()
-        supabase.auth.reset_password_email(email, options={"redirect_to": site_url})
-        return True, "Password reset email sent. Check your inbox."
+        _get_supabase().auth.reset_password_email(
+            email, options={"redirect_to": _get_site_url()}
+        )
+        return True, "Password reset email sent."
     except Exception as e:
         return False, f"Error: {e}"
 
 
 def auth_logout():
-    try:
-        supabase = _get_supabase()
-        supabase.auth.sign_out()
-    except Exception:
-        pass
-
-    keys_to_clear = [
-        "authenticated", "user_id", "email", "full_name",
-        "role", "jwt_token", "demo_mode", "current_page",
-        "active_project", "active_df", "col_map",
-        "trained_models", "forecast_results",
-        "_kpis", "_seasonal", "_monthly", "_daily",
-        "_daily_eng", "_feat_cols", "_best_model",
-    ]
-    for key in keys_to_clear:
+    try: _get_supabase().auth.sign_out()
+    except Exception: pass
+    for key in ["authenticated", "user_id", "email", "full_name", "role", "jwt_token",
+                "demo_mode", "current_page", "active_project", "active_df", "col_map",
+                "trained_models", "forecast_results", "_kpis", "_seasonal", "_monthly",
+                "_daily", "_daily_eng", "_feat_cols", "_best_model"]:
         st.session_state.pop(key, None)
-
-    st.session_state.authenticated  = False
-    st.session_state.demo_mode      = False
-    st.session_state.current_page   = "home"
-    st.session_state.active_project = None
-    st.session_state.active_df      = None
-    st.session_state.col_map        = {}
+    st.session_state.update({
+        "authenticated": False, "demo_mode": False, "current_page": "home",
+        "active_project": None, "active_df": None, "col_map": {},
+    })
 
 
 # ── Helpers ──────────────────────────────────────────────────────
 
-def _get_site_url() -> str:
+def _get_site_url():
     try:
         url = st.secrets.get("SITE_URL", "") or os.environ.get("SITE_URL", "")
     except Exception:
@@ -185,94 +147,67 @@ def _get_site_url() -> str:
     return (url or "https://deploy-financial66.streamlit.app/").rstrip("/") + "/"
 
 
-def _get_supabase_url() -> str:
+def _get_supabase_url():
     try:
         return st.secrets.get("SUPABASE_URL", "") or os.environ.get("SUPABASE_URL", "")
     except Exception:
         return os.environ.get("SUPABASE_URL", "")
 
 
-def _get_callback_url() -> str:
-    """
-    Returns the URL of oauth_callback.html — the intermediate page that
-    extracts the token from the URL fragment and forwards it to Streamlit.
-
-    For Streamlit Cloud, static files in /static/ are served at:
-      https://<app>.streamlit.app/app/static/<filename>
-
-    We serve oauth_callback.html from the /static/ folder.
-    """
+def _get_callback_url():
     try:
         cb = st.secrets.get("OAUTH_CALLBACK_URL", "") or os.environ.get("OAUTH_CALLBACK_URL", "")
     except Exception:
         cb = os.environ.get("OAUTH_CALLBACK_URL", "")
-
     if cb:
         return cb
-
-    # Default: Streamlit Cloud serves files in /static/ at this path
     base = _get_site_url().rstrip("/")
     return f"{base}/app/static/oauth_callback.html"
 
 
 # ── Google OAuth ─────────────────────────────────────────────────
 
-def auth_google_login_url() -> str:
-    """
-    Builds the Supabase Google OAuth URL.
-
-    REDIRECT STRATEGY
-    -----------------
-    We redirect to oauth_callback.html (a static file in /static/).
-    That page runs in a real browser context (not an iframe), reads the
-    #access_token fragment, and redirects to the Streamlit app with
-    ?st_access_token=... as a query param that Python can read.
-
-    Why not redirect straight to the Streamlit app?
-      Streamlit renders inside an iframe on Streamlit Cloud.
-      st.components.v1.html() also renders in a nested iframe.
-      Neither can access or modify the top-level window.location.
-      A standalone HTML page has no such restriction.
-    """
+def auth_google_login_url():
     import urllib.parse
-
-    supabase_url  = _get_supabase_url().rstrip("/")
-    callback_url  = _get_callback_url()
-
     params = urllib.parse.urlencode({
         "provider":    "google",
-        "redirect_to": callback_url,   # → oauth_callback.html, not Streamlit directly
+        "redirect_to": _get_callback_url(),
         "scopes":      "email profile",
     })
-
-    return f"{supabase_url}/auth/v1/authorize?{params}"
+    return f"{_get_supabase_url().rstrip('/')}/auth/v1/authorize?{params}"
 
 
 def auth_handle_google_callback() -> bool:
     """
-    Reads ?st_access_token= forwarded by oauth_callback.html,
-    validates with Supabase, sets session state.
-    Returns True if a new session was established.
+    Handles two callback patterns from oauth_callback.html:
+      1. ?st_access_token=...   (implicit flow — token forwarded from fragment)
+      2. ?code=...              (PKCE flow — exchange code for token server-side)
     """
     params = st.query_params
 
-    # Explicit OAuth error forwarded by the callback page
-    error = params.get("error")
-    if error:
-        desc = params.get("error_description", error)
-        st.error(f"Google sign-in failed: {desc}")
+    # ── Explicit error ────────────────────────────────────────────
+    if params.get("error"):
+        st.error(f"Google sign-in failed: {params.get('error_description', params.get('error'))}")
         st.query_params.clear()
         return False
 
-    # Token forwarded from oauth_callback.html
+    # ── Path 1: implicit — token already in hand ──────────────────
     access_token = params.get("st_access_token")
-    if not access_token:
-        return False
+    if access_token:
+        return _login_with_token(access_token)
 
+    # ── Path 2: PKCE code exchange ────────────────────────────────
+    code = params.get("code")
+    if code:
+        return _exchange_code(code)
+
+    return False
+
+
+def _login_with_token(access_token: str) -> bool:
     try:
-        supabase = _get_supabase()
-        user_res = supabase.auth.get_user(access_token)
-
+        supabase  = _get_supabase()
+        user_res  = supabase.auth.get_user(access_token)
         if not user_res or not user_res.user:
             st.error("Google sign-in: token invalid or expired. Please try again.")
             st.query_params.clear()
@@ -284,31 +219,57 @@ def auth_handle_google_callback() -> bool:
         _set_session_from_supabase(user_res.user, _Sess(access_token))
         st.query_params.clear()
         return True
-
     except Exception as e:
-        import traceback
         st.error(f"Google sign-in error: {e}")
-        st.code(traceback.format_exc(), language="python")
         st.query_params.clear()
         return False
 
 
-# ── Token verification ───────────────────────────────────────────
-
-def auth_verify_token(token: str):
+def _exchange_code(code: str) -> bool:
+    """Exchange PKCE auth code for a session using Supabase's token endpoint."""
     try:
-        supabase = _get_supabase()
-        res = supabase.auth.get_user(token)
+        supabase_url = _get_supabase_url().rstrip("/")
+        try:
+            key = st.secrets.get("SUPABASE_ANON_KEY", "") or os.environ.get("SUPABASE_ANON_KEY", "")
+        except Exception:
+            key = os.environ.get("SUPABASE_ANON_KEY", "")
+
+        import httpx
+        resp = httpx.post(
+            f"{supabase_url}/auth/v1/token?grant_type=authorization_code",
+            headers={"apikey": key, "Content-Type": "application/json"},
+            json={"code": code},
+            timeout=15,
+        )
+
+        if resp.status_code == 200:
+            data = resp.json()
+            access_token = data.get("access_token")
+            if access_token:
+                return _login_with_token(access_token)
+
+        # If authorization_code grant fails, surface helpful message
+        st.error(
+            f"Code exchange failed (HTTP {resp.status_code}). "
+            "In Supabase Dashboard → Authentication → URL Configuration, "
+            "ensure Auth Flow is set to **Implicit** (not PKCE)."
+        )
+        st.query_params.clear()
+        return False
+    except Exception as e:
+        st.error(f"Code exchange error: {e}")
+        st.query_params.clear()
+        return False
+
+
+def auth_verify_token(token):
+    try:
+        res = _get_supabase().auth.get_user(token)
         if res.user:
             meta = res.user.user_metadata or {}
-            return True, {
-                "user": {
-                    "id":        res.user.id,
-                    "email":     res.user.email,
-                    "full_name": meta.get("full_name", ""),
-                    "role":      meta.get("role", "analyst"),
-                }
-            }
+            return True, {"user": {"id": res.user.id, "email": res.user.email,
+                                   "full_name": meta.get("full_name", ""),
+                                   "role": meta.get("role", "analyst")}}
         return False, "Invalid token"
     except Exception as e:
         return False, str(e)
