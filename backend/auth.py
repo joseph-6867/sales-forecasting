@@ -19,10 +19,7 @@ def _get_supabase() -> Client:
     if not url or not key:
         raise RuntimeError(
             "Supabase credentials missing. "
-            "Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit Cloud secrets "
-            "(App settings → Secrets) in TOML format:\n"
-            'SUPABASE_URL = "https://..."\n'
-            'SUPABASE_ANON_KEY = "eyJ..."'
+            "Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit Cloud secrets."
         )
     return create_client(url, key)
 
@@ -67,7 +64,7 @@ def get_current_user() -> dict:
     }
 
 
-# ── Helpers ──────────────────────────────────────────────────────
+# ── Session setter ───────────────────────────────────────────────
 
 def _set_session_from_supabase(user, session):
     meta = user.user_metadata if hasattr(user, "user_metadata") else {}
@@ -104,7 +101,7 @@ def auth_register(email: str, password: str, full_name: str, role: str = "analys
                 return True, {"message": "Account created successfully! Welcome 🎉", "auto_login": True}
             else:
                 return True, {
-                    "message": "✅ Account created! Check your email to confirm, then log in.",
+                    "message": "Account created! Check your email to confirm, then log in.",
                     "auto_login": False,
                 }
         return False, {"message": "Registration failed. Please try again.", "auto_login": False}
@@ -130,7 +127,7 @@ def auth_login(email: str, password: str):
             meta = res.user.user_metadata or {}
             _set_session_from_supabase(res.user, res.session)
             return True, {
-                "message": f"Welcome back, {meta.get('full_name', res.user.email)}! ✅"
+                "message": f"Welcome back, {meta.get('full_name', res.user.email)}!"
             }
         return False, {"message": "Login failed. Check your credentials."}
     except Exception as e:
@@ -178,7 +175,7 @@ def auth_logout():
     st.session_state.col_map        = {}
 
 
-# ── Google OAuth ─────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────
 
 def _get_site_url() -> str:
     try:
@@ -195,24 +192,13 @@ def _get_supabase_url() -> str:
         return os.environ.get("SUPABASE_URL", "")
 
 
+# ── Google OAuth ─────────────────────────────────────────────────
+
 def auth_google_login_url() -> str:
     """
-    Returns the Supabase Google OAuth URL using the IMPLICIT flow
-    (no PKCE, no custom state).
-
-    Why implicit / no-PKCE:
-      PKCE requires the code_verifier to be present when the callback
-      lands.  Supabase stores its own verifier in JS localStorage, but
-      supabase-py stores it in an in-process MemoryStorage that is tied
-      to the client instance.  When Google redirects back, Streamlit
-      spins up a brand-new Python process (or at minimum a new session),
-      the client is recreated, MemoryStorage is empty, and the exchange
-      fails with `bad_oauth_state`.
-
-    The server-side (no-PKCE) flow works because:
-      - Supabase issues a short-lived auth code tied to its own server session
-      - We exchange it directly at /auth/v1/token without needing a verifier
-      - Security is maintained by the short code lifetime + HTTPS
+    Returns the Supabase Google OAuth URL (implicit flow).
+    Supabase redirects back with tokens in the URL fragment: #access_token=...
+    inject_fragment_listener() extracts them and forwards to Streamlit.
     """
     import urllib.parse
 
@@ -228,24 +214,68 @@ def auth_google_login_url() -> str:
     return f"{supabase_url}/auth/v1/authorize?{params}"
 
 
+def inject_fragment_listener():
+    """
+    Injects JavaScript that bridges the URL fragment → Streamlit query params.
+
+    The problem:
+      Supabase implicit flow puts the access token in the URL FRAGMENT
+      (e.g. https://app/#access_token=eyJ...). Fragments are never sent
+      to the server — they exist only in the browser. Streamlit's
+      st.query_params only sees ?key=value query params, never #fragments.
+
+    The fix:
+      This JS snippet runs in the browser, reads window.location.hash,
+      extracts access_token, and rewrites the URL to use ?st_access_token=
+      instead. That triggers a page reload with a query param Streamlit
+      CAN read. auth_handle_google_callback() then validates the token.
+
+    This is a no-op if there is no access_token in the fragment.
+    """
+    st.components.v1.html(
+        """
+        <script>
+        (function() {
+            var hash = window.location.hash;
+            if (!hash || hash.length < 2) return;
+
+            // Parse fragment as key=value pairs
+            var params = {};
+            hash.substring(1).split('&').forEach(function(part) {
+                var kv = part.split('=');
+                if (kv.length >= 2) {
+                    params[decodeURIComponent(kv[0])] = decodeURIComponent(kv.slice(1).join('='));
+                }
+            });
+
+            var accessToken = params['access_token'];
+            if (!accessToken) return;  // not an OAuth callback fragment
+
+            // Build query string Streamlit can read, then reload
+            var qs = '?st_access_token=' + encodeURIComponent(accessToken);
+            if (params['refresh_token']) {
+                qs += '&st_refresh_token=' + encodeURIComponent(params['refresh_token']);
+            }
+
+            // Replace current URL — removes the fragment, adds ?st_access_token=
+            // window.location.replace prevents a back-button loop
+            window.location.replace(window.location.pathname + qs);
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def auth_handle_google_callback() -> bool:
     """
-    Handles the OAuth callback.
-
-    Supabase can redirect back in two ways depending on project settings:
-
-    1. PKCE / server flow  → ?code=<auth_code>  in query params
-    2. Implicit flow       → #access_token=...  in the URL fragment
-
-    Fragments (#...) are never sent to the server, so Streamlit cannot
-    see them via st.query_params.  We therefore use the code-exchange
-    path (option 1) but WITHOUT a PKCE code_verifier — Supabase accepts
-    this when the project's auth flow is set to "Implicit" or when no
-    challenge was included in the original authorize request.
+    Reads ?st_access_token= (forwarded from the # fragment by inject_fragment_listener),
+    validates it against Supabase, and populates st.session_state.
+    Returns True if a new session was established.
     """
     params = st.query_params
 
-    # ── Handle explicit errors from Supabase / Google ────────────
+    # Explicit OAuth error
     error = params.get("error")
     if error:
         desc = params.get("error_description", error)
@@ -253,79 +283,17 @@ def auth_handle_google_callback() -> bool:
         st.query_params.clear()
         return False
 
-    # ── Code-exchange flow ───────────────────────────────────────
-    code = params.get("code")
-    if not code:
-        return False   # No callback params — normal page load
+    # Token forwarded from JS fragment bridge
+    access_token = params.get("st_access_token")
+    if not access_token:
+        return False
 
     try:
-        supabase_url = _get_supabase_url().rstrip("/")
-        try:
-            key = st.secrets.get("SUPABASE_ANON_KEY", "") or os.environ.get("SUPABASE_ANON_KEY", "")
-        except Exception:
-            key = os.environ.get("SUPABASE_ANON_KEY", "")
-
-        import httpx
-
-        # Exchange the auth code for tokens — no code_verifier needed
-        # because we did not send a code_challenge in the authorize request
-        resp = httpx.post(
-            f"{supabase_url}/auth/v1/token?grant_type=authorization_code",
-            headers={
-                "apikey":       key,
-                "Content-Type": "application/json",
-            },
-            json={"code": code},
-            timeout=15,
-        )
-
-        if resp.status_code != 200:
-            # Supabase may require the pkce grant_type even without a verifier
-            # on some project configurations — try the pkce endpoint with an
-            # empty verifier as a fallback.
-            resp2 = httpx.post(
-                f"{supabase_url}/auth/v1/token?grant_type=pkce",
-                headers={
-                    "apikey":       key,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "auth_code":     code,
-                    "code_verifier": "",
-                },
-                timeout=15,
-            )
-            if resp2.status_code == 200:
-                resp = resp2
-            else:
-                st.error(
-                    f"Google sign-in failed (HTTP {resp.status_code}).\n\n"
-                    f"**Fix:** In your Supabase dashboard → Authentication → "
-                    f"URL Configuration, set the Auth Flow to **Implicit** "
-                    f"and add `{_get_site_url()}` to the Redirect URLs allow-list."
-                )
-                st.query_params.clear()
-                return False
-
-        data         = resp.json()
-        access_token = data.get("access_token")
-
-        if not access_token:
-            st.error(
-                f"Google sign-in: no access_token in response.\n\n"
-                f"Response: `{data}`\n\n"
-                f"**Fix:** In Supabase → Authentication → URL Configuration, "
-                f"set Auth Flow to **Implicit** and whitelist `{_get_site_url()}`."
-            )
-            st.query_params.clear()
-            return False
-
-        # ── Get user info ────────────────────────────────────────
         supabase = _get_supabase()
         user_res = supabase.auth.get_user(access_token)
 
         if not user_res or not user_res.user:
-            st.error("Google sign-in: could not retrieve user from access token.")
+            st.error("Google sign-in: token invalid or expired. Please try again.")
             st.query_params.clear()
             return False
 
