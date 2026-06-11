@@ -154,35 +154,76 @@ def _get_supabase_url():
         return os.environ.get("SUPABASE_URL", "")
 
 
-def _get_callback_url():
-    try:
-        cb = st.secrets.get("OAUTH_CALLBACK_URL", "") or os.environ.get("OAUTH_CALLBACK_URL", "")
-    except Exception:
-        cb = os.environ.get("OAUTH_CALLBACK_URL", "")
-    if cb:
-        return cb
-    base = _get_site_url().rstrip("/")
-    return f"{base}/app/static/oauth_callback.html"
-
-
 # ── Google OAuth ─────────────────────────────────────────────────
+# Strategy: redirect_to points directly back to the Streamlit app.
+# Supabase appends #access_token=... to the URL (implicit flow).
+# A small JS snippet in the page converts the fragment to ?st_access_token=
+# so Streamlit can read it as a query param.
 
 def auth_google_login_url():
+    """
+    Build the Supabase OAuth URL.
+    redirect_to = your Streamlit app URL (Supabase will append the token fragment there).
+    """
     import urllib.parse
+    redirect_to = _get_site_url().rstrip("/") + "/"
     params = urllib.parse.urlencode({
         "provider":    "google",
-        "redirect_to": _get_callback_url(),
+        "redirect_to": redirect_to,
         "scopes":      "email profile",
     })
     return f"{_get_supabase_url().rstrip('/')}/auth/v1/authorize?{params}"
 
 
+def inject_oauth_fragment_handler():
+    """
+    Inject a JS snippet once per page load.
+    If the URL contains #access_token=..., convert it to ?st_access_token=
+    so Streamlit picks it up as a query param on the next render.
+    This is needed because Streamlit cannot read URL fragments server-side.
+    """
+    st.components.v1.html(
+        """
+        <script>
+        (function() {
+            var hash = window.location.hash;
+            if (!hash) return;
+
+            var params = {};
+            hash.substring(1).split('&').forEach(function(part) {
+                var kv = part.split('=');
+                if (kv.length === 2) params[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1]);
+            });
+
+            var accessToken = params['access_token'];
+            if (!accessToken) return;
+
+            // Already converted — avoid infinite loop
+            if (window.location.search.indexOf('st_access_token') !== -1) return;
+
+            // Build new URL with token as query param so Streamlit can read it
+            var newUrl = window.location.origin + window.location.pathname
+                + '?st_access_token=' + encodeURIComponent(accessToken)
+                + '&token_type=' + encodeURIComponent(params['token_type'] || 'bearer');
+            window.location.replace(newUrl);
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def auth_handle_google_callback() -> bool:
     """
-    Handles two callback patterns from oauth_callback.html:
-      1. ?st_access_token=...   (implicit flow — token forwarded from fragment)
-      2. ?code=...              (PKCE flow — exchange code for token server-side)
+    1. Always inject the JS fragment handler so tokens in the URL hash get
+       converted to query params on first load.
+    2. Then check for ?st_access_token= and log the user in.
+    3. Also handles ?code= (PKCE) as a fallback.
+    Returns True if login succeeded (caller should st.rerun()).
     """
+    # Step 1: always inject fragment→query-param converter
+    inject_oauth_fragment_handler()
+
     params = st.query_params
 
     # ── Explicit error ────────────────────────────────────────────
@@ -191,12 +232,12 @@ def auth_handle_google_callback() -> bool:
         st.query_params.clear()
         return False
 
-    # ── Path 1: implicit — token already in hand ──────────────────
+    # ── Path 1: implicit — token in query param (set by JS above) ─
     access_token = params.get("st_access_token")
     if access_token:
         return _login_with_token(access_token)
 
-    # ── Path 2: PKCE code exchange ────────────────────────────────
+    # ── Path 2: PKCE code exchange (fallback) ─────────────────────
     code = params.get("code")
     if code:
         return _exchange_code(code)
@@ -248,7 +289,6 @@ def _exchange_code(code: str) -> bool:
             if access_token:
                 return _login_with_token(access_token)
 
-        # If authorization_code grant fails, surface helpful message
         st.error(
             f"Code exchange failed (HTTP {resp.status_code}). "
             "In Supabase Dashboard → Authentication → URL Configuration, "
