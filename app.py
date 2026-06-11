@@ -1,13 +1,7 @@
-
-
 # ================================================================
 # app.py — Main Entry Point
 # ================================================================
 # Run with: streamlit run app.py
-#
-# Routes:
-#   Not logged in  → Auth page (login / register / forgot pw / Google)
-#   Logged in      → Dashboard
 #
 # Google Sign-In uses Supabase built-in OAuth — no manual Client ID
 # handling in Python. Configure in:
@@ -21,20 +15,7 @@
 import time
 import streamlit as st
 
-# Initialize all session state keys with defaults
-DEFAULTS = {
-    "active_project": None,
-    "demo_mode": False,
-    "user_id": None,
-    "full_name": None,
-    "role": "analyst",
-    # add any other keys your app uses
-}
-
-for key, val in DEFAULTS.items():
-    if key not in st.session_state:
-        st.session_state[key] = val
-
+# ── MUST be first Streamlit call ─────────────────────────────────
 st.set_page_config(
     page_title="Sales Forecasting Platform",
     page_icon="📊",
@@ -43,6 +24,41 @@ st.set_page_config(
     menu_items={"About": "# Sales Forecasting Platform v1.0"},
 )
 
+# ── Initialize ALL session state keys BEFORE any imports that use them ──
+# This prevents KeyError on any page reload or cold start.
+# active_project and active_df are not in init_session() in auth.py,
+# so we guard them here.
+_DEFAULTS = {
+    # Auth keys (also set by init_session, but safe to pre-init)
+    "authenticated":  False,
+    "user_id":        None,
+    "email":          None,
+    "full_name":      None,
+    "role":           "analyst",
+    "jwt_token":      None,
+    "demo_mode":      False,
+    "current_page":   "home",
+    # Dashboard keys NOT covered by init_session
+    "active_project": None,
+    "active_df":      None,
+    "col_map":        {},
+    # Misc
+    "register_cooldown": 0,
+    "trained_models":    None,
+    "forecast_results":  {},
+    "_kpis":             None,
+    "_seasonal":         None,
+    "_monthly":          None,
+    "_daily":            None,
+    "_daily_eng":        None,
+    "_feat_cols":        None,
+    "_best_model":       None,
+}
+for _k, _v in _DEFAULTS.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
+# ── Now safe to import everything ────────────────────────────────
 from backend.auth import (
     init_session,
     is_auth,
@@ -54,18 +70,21 @@ from backend.auth import (
 )
 from frontend.dashboard import render_dashboard
 
+# init_session fills auth keys if missing (harmless since we pre-inited above)
 init_session()
+
 
 # ================================================================
 # AUTH PAGE
 # ================================================================
 
 def _auth_page():
-    # ── Handle Google OAuth callback first (before any UI) ──────
+    # ── Handle Google OAuth callback first (before any UI) ───────
+    # Supabase redirects back with ?code= — exchange it for a session.
     if auth_handle_google_callback():
         st.rerun()
 
-    # ── Hero ─────────────────────────────────────────────────────
+    # ── Hero ──────────────────────────────────────────────────────
     st.markdown(
         """
         <div style="text-align:center;padding:36px 0 20px">
@@ -81,7 +100,7 @@ def _auth_page():
 
     left, right = st.columns([3, 2], gap="large")
 
-    # ── LEFT: Feature highlights ─────────────────────────────────
+    # ── LEFT: Feature highlights ──────────────────────────────────
     with left:
         st.subheader("🚀 What you get")
         cols = st.columns(2)
@@ -100,7 +119,7 @@ def _auth_page():
         for i, (icon, title, desc) in enumerate(features):
             cols[i % 2].info(f"**{icon} {title}**\n\n{desc}")
 
-    # ── RIGHT: Auth forms ─────────────────────────────────────────
+    # ── RIGHT: Auth forms ──────────────────────────────────────────
     with right:
         tab_login, tab_register, tab_forgot = st.tabs(
             ["🔑 Log In", "📝 Register", "🔒 Forgot Password"]
@@ -108,33 +127,7 @@ def _auth_page():
 
         # ── LOGIN ────────────────────────────────────────────────
         with tab_login:
-
-            # Google Sign-In button (Supabase handles everything)
-            google_url = auth_google_login_url()
-            st.markdown(
-                f"""
-                <a href="{google_url}" target="_self" style="text-decoration:none;">
-                    <div style="
-                        display:flex;align-items:center;justify-content:center;gap:10px;
-                        background:#fff;border:1px solid #dadce0;border-radius:6px;
-                        padding:10px 16px;cursor:pointer;font-family:sans-serif;
-                        font-size:15px;font-weight:500;color:#3c4043;
-                        box-shadow:0 1px 2px rgba(0,0,0,.08);
-                        transition:box-shadow .2s;
-                    ">
-                        <svg width="18" height="18" viewBox="0 0 48 48">
-                            <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
-                            <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
-                            <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
-                            <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.35-8.16 2.35-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
-                            <path fill="none" d="M0 0h48v48H0z"/>
-                        </svg>
-                        Sign in with Google
-                    </div>
-                </a>
-                """,
-                unsafe_allow_html=True,
-            )
+            _google_button("Sign in with Google")
 
             st.divider()
 
@@ -174,37 +167,12 @@ def _auth_page():
 
         # ── REGISTER ─────────────────────────────────────────────
         with tab_register:
-
-            # Google Sign-Up (same URL — Supabase creates account if new)
-            google_url = auth_google_login_url()
-            st.markdown(
-                f"""
-                <a href="{google_url}" target="_self" style="text-decoration:none;">
-                    <div style="
-                        display:flex;align-items:center;justify-content:center;gap:10px;
-                        background:#fff;border:1px solid #dadce0;border-radius:6px;
-                        padding:10px 16px;cursor:pointer;font-family:sans-serif;
-                        font-size:15px;font-weight:500;color:#3c4043;
-                        box-shadow:0 1px 2px rgba(0,0,0,.08);
-                    ">
-                        <svg width="18" height="18" viewBox="0 0 48 48">
-                            <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
-                            <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
-                            <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
-                            <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.35-8.16 2.35-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
-                            <path fill="none" d="M0 0h48v48H0z"/>
-                        </svg>
-                        Sign up with Google
-                    </div>
-                </a>
-                """,
-                unsafe_allow_html=True,
-            )
+            _google_button("Sign up with Google")
 
             st.divider()
 
-            cooldown    = st.session_state.get("register_cooldown", 0)
-            secs_left   = max(0, int(cooldown - time.time()))
+            cooldown     = st.session_state.get("register_cooldown", 0)
+            secs_left    = max(0, int(cooldown - time.time()))
             reg_disabled = secs_left > 0
 
             if reg_disabled:
@@ -212,11 +180,11 @@ def _auth_page():
 
             with st.form("register_form"):
                 st.subheader("Create account with Email")
-                reg_name  = st.text_input("Full Name",           placeholder="Jane Smith")
-                reg_email = st.text_input("Email",               placeholder="you@example.com")
-                reg_role  = st.selectbox("Role",                 ["analyst", "admin"])
+                reg_name  = st.text_input("Full Name",              placeholder="Jane Smith")
+                reg_email = st.text_input("Email",                  placeholder="you@example.com")
+                reg_role  = st.selectbox("Role",                    ["analyst", "admin"])
                 reg_pass  = st.text_input("Password (min 6 chars)", type="password")
-                reg_pass2 = st.text_input("Confirm Password",    type="password")
+                reg_pass2 = st.text_input("Confirm Password",       type="password")
                 reg_sub   = st.form_submit_button(
                     "Create Account",
                     use_container_width=True,
@@ -241,7 +209,7 @@ def _auth_page():
                     else:
                         st.error(msg)
 
-        # ── FORGOT PASSWORD ──────────────────────────────────────
+        # ── FORGOT PASSWORD ───────────────────────────────────────
         with tab_forgot:
             with st.form("forgot_form"):
                 st.subheader("Reset Password")
@@ -259,6 +227,43 @@ def _auth_page():
                         st.success(msg)
                     else:
                         st.error(msg)
+
+
+def _google_button(label: str):
+    """Render the Google OAuth button. Fetches the URL each time."""
+    try:
+        google_url = auth_google_login_url()
+    except Exception as e:
+        st.error(f"Google OAuth unavailable: {e}")
+        return
+
+    if google_url.startswith("?google_error="):
+        st.error(f"Google OAuth config error. Check Supabase → Authentication → Providers → Google.")
+        return
+
+    st.markdown(
+        """
+        <a href="{google_url}" target="_self" style="text-decoration:none;">
+            <div style="
+                display:flex;align-items:center;justify-content:center;gap:10px;
+                background:#fff;border:1px solid #dadce0;border-radius:6px;
+                padding:10px 16px;cursor:pointer;font-family:sans-serif;
+                font-size:15px;font-weight:500;color:#3c4043;
+                box-shadow:0 1px 2px rgba(0,0,0,.08);
+            ">
+                <svg width="18" height="18" viewBox="0 0 48 48">
+                    <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                    <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                    <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                    <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.35-8.16 2.35-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+                    <path fill="none" d="M0 0h48v48H0z"/>
+                </svg>
+                {label}
+            </div>
+        </a>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ================================================================
