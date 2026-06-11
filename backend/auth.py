@@ -315,7 +315,7 @@ def auth_handle_google_callback() -> bool:
     """
     import base64
     encoded = base64.b64encode(js_code.encode()).decode()
-    st.iframe(f"data:text/html;base64,{encoded}", height=0)
+    st.iframe(f"data:text/html;base64,{encoded}", height=1)
 
     return False
 
