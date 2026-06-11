@@ -52,16 +52,17 @@ def render_dashboard():
 
 def _sidebar():
     """Sidebar navigation + page routing."""
-    uid   = st.session_state.user_id
-    name  = st.session_state.full_name or "User"
-    role  = st.session_state.role or "analyst"
-    proj  = st.session_state.active_project
+    uid     = st.session_state.get("user_id")
+    name    = st.session_state.get("full_name") or "User"
+    role    = st.session_state.get("role") or "analyst"
+    # Use .get() with a default — this is the key fix for the KeyError crash
+    proj    = st.session_state.get("active_project", None)
     is_demo = st.session_state.get("demo_mode", False)
 
     with st.sidebar:
         st.markdown("## 📊 Sales Platform")
         st.markdown(f"**{name}**")
-        st.caption(f"Role: `{role.title()}` · {st.session_state.email}")
+        st.caption(f"Role: `{role.title()}` · {st.session_state.get('email', '')}")
         st.divider()
 
         pages = [
@@ -83,7 +84,7 @@ def _sidebar():
             pages = [p for p in pages if p[2] not in ["projects", "upload"]]
 
         for icon, label, key in pages:
-            active = st.session_state.current_page == key
+            active    = st.session_state.get("current_page") == key
             btn_label = f"{icon} {label}" + (" ◀" if active else "")
             if st.button(btn_label, key=f"nav_{key}", use_container_width=True):
                 st.session_state.current_page = key
@@ -92,10 +93,10 @@ def _sidebar():
         st.divider()
         if proj:
             st.success(f"📁 **{proj['name'][:20]}**")
-            df = st.session_state.active_df
+            df = st.session_state.get("active_df")
             if df is not None:
                 st.caption(f"{len(df):,} rows · {len(df.columns)} cols")
-        elif st.session_state.demo_mode:
+        elif is_demo:
             st.info("🎮 Demo Mode Active")
 
         st.divider()
@@ -104,7 +105,7 @@ def _sidebar():
             st.rerun()
 
     # Route to the correct page
-    page = st.session_state.current_page
+    page = st.session_state.get("current_page", "home")
     if   page == "home":        _page_home()
     elif page == "projects":    _page_projects()
     elif page == "upload":      _page_upload()
@@ -124,8 +125,8 @@ def _sidebar():
 # ================================================================
 
 def _page_home():
-    uid  = st.session_state.user_id
-    name = st.session_state.full_name or "User"
+    uid     = st.session_state.get("user_id")
+    name    = st.session_state.get("full_name") or "User"
     is_demo = st.session_state.get("demo_mode", False)
 
     # Auto-load demo dataset on first visit for demo users
@@ -137,11 +138,9 @@ def _page_home():
     st.markdown("Your intelligent sales forecasting and business analytics workspace.")
     st.divider()
 
-    # ── Quick Action Buttons ──────────────────────────────
-    cols = []
+    # ── Quick Action Buttons ───────────────────────────────────────
     if not is_demo:
         c1, c2, c3, c4 = st.columns(4)
-        cols = [c1, c2, c3, c4]
         with c1:
             if st.button("🎮 Explore Demo Dataset", use_container_width=True, type="primary"):
                 _load_demo()
@@ -160,7 +159,6 @@ def _page_home():
                 st.session_state.current_page = "forecasting"
                 st.rerun()
     else:
-        # Demo mode: show only feature exploration buttons
         c1, c2, c3 = st.columns(3)
         with c1:
             if st.button("📈 View Analytics", use_container_width=True, type="primary"):
@@ -174,13 +172,16 @@ def _page_home():
             if st.button("📋 Generate Reports", use_container_width=True):
                 st.session_state.current_page = "reports"
                 st.rerun()
-        st.info("🎮 **Demo Mode**: Explore all features using the built-in dataset. No file uploads or project management in demo mode.")
+        st.info(
+            "🎮 **Demo Mode**: Explore all features using the built-in dataset. "
+            "No file uploads or project management in demo mode."
+        )
 
     st.divider()
 
-    # ── Feature showcase ──────────────────────────────────
+    # ── Feature showcase ───────────────────────────────────────────
     st.subheader("✨ Platform Features")
-    f1,f2,f3 = st.columns(3)
+    f1, f2, f3 = st.columns(3)
     with f1:
         st.info("**📤 Data Upload**\n\nCSV & Excel. Auto-detects sales, date, product, region columns.")
         st.info("**📈 Trend Analysis**\n\nDaily, weekly, monthly, yearly views with rolling averages.")
@@ -196,61 +197,89 @@ def _page_home():
 
     st.divider()
 
-    # ── Recent Projects ───────────────────────────────────
-    st.subheader("📁 Recent Projects")
-    projects = db_get_projects(uid)
+    # ── Recent Projects (skip for demo users — no real DB records) ─
+    if not is_demo:
+        st.subheader("📁 Recent Projects")
+        projects = db_get_projects(uid)
 
-    if not projects:
-        st.info("No projects yet. Click **New Project** or **Explore Demo Dataset** to get started.")
-    else:
-        for p in projects[:4]:
-            with st.container():
-                pc1, pc2, pc3 = st.columns([4,2,2])
+        if not projects:
+            st.info("No projects yet. Click **New Project** or **Explore Demo Dataset** to get started.")
+        else:
+            for p in projects[:4]:
+                pc1, pc2, pc3 = st.columns([4, 2, 2])
                 with pc1:
                     st.markdown(f"**{p['name']}**  \n{p.get('description','')[:60]}")
                 with pc2:
                     st.caption(f"Rows: {p.get('dataset_rows',0):,}  ·  {p['created_at'][:10]}")
                 with pc3:
                     if st.button("Open", key=f"open_{p['id']}"):
-                        _open_project(p['id'])
+                        _open_project(p["id"])
+                        st.rerun()
                 st.divider()
 
-    # ── Platform stats ────────────────────────────────────
-    st.subheader("📊 Your Statistics")
-    s1,s2,s3,s4 = st.columns(4)
-    s1.metric("Projects",   len(projects))
-    forecasts = db_get_forecasts(projects[0]['id']) if projects else []
-    s2.metric("Forecasts Run", len(forecasts))
-    reports   = db_get_reports(projects[0]['id']) if projects else []
-    s3.metric("Reports Generated", len(reports))
-    s4.metric("Role", (st.session_state.role or "analyst").title())
+        # ── Platform stats ─────────────────────────────────────────
+        st.subheader("📊 Your Statistics")
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Projects", len(projects))
+        forecasts = db_get_forecasts(projects[0]["id"]) if projects else []
+        s2.metric("Forecasts Run", len(forecasts))
+        reports   = db_get_reports(projects[0]["id"]) if projects else []
+        s3.metric("Reports Generated", len(reports))
+        s4.metric("Role", (st.session_state.get("role") or "analyst").title())
 
 
 def _load_demo():
     """Load the built-in demo dataset into session state."""
     df = get_demo_df()
-    st.session_state.active_df   = df
-    st.session_state.demo_mode   = True
-    st.session_state.col_map = {
+    st.session_state.active_df = df
+    st.session_state.demo_mode = True
+    st.session_state.col_map   = {
         "date":    "date",
         "sales":   "sales",
         "product": "product",
         "region":  "region",
     }
-    # Create/use a demo project
-    uid = st.session_state.user_id
-    projects = db_get_projects(uid)
-    demo_proj = next((p for p in projects if p["name"] == "Demo Project"), None)
-    if not demo_proj:
-        demo_proj = db_create_project(uid, "Demo Project",
-                                       "Auto-created demo project with synthetic sales data.")
-    if demo_proj:
-        st.session_state.active_project = demo_proj
-        db_update_project(demo_proj["id"], {
-            "dataset_rows": len(df),
-            "dataset_cols": len(df.columns),
-            "date_range":   f"{df['date'].min().date()} → {df['date'].max().date()}"
-        })
+
+    uid      = st.session_state.get("user_id")
+    is_demo  = uid == "demo-user"
+
+    if is_demo:
+        # Demo users have no real Supabase account — use a local fake project
+        if not st.session_state.get("active_project"):
+            st.session_state.active_project = {
+                "id":          "demo-project",
+                "name":        "Demo Project",
+                "description": "Auto-created demo project with synthetic sales data.",
+                "created_at":  datetime.now().isoformat(),
+                "dataset_rows": len(df),
+                "dataset_cols": len(df.columns),
+            }
+    else:
+        # Real user — persist to Supabase
+        try:
+            projects  = db_get_projects(uid)
+            demo_proj = next((p for p in projects if p["name"] == "Demo Project"), None)
+            if not demo_proj:
+                demo_proj = db_create_project(
+                    uid, "Demo Project",
+                    "Auto-created demo project with synthetic sales data."
+                )
+            if demo_proj:
+                st.session_state.active_project = demo_proj
+                db_update_project(demo_proj["id"], {
+                    "dataset_rows": len(df),
+                    "dataset_cols": len(df.columns),
+                    "date_range":   f"{df['date'].min().date()} → {df['date'].max().date()}"
+                })
+        except Exception:
+            # Gracefully fall back to a local project dict on DB error
+            st.session_state.active_project = {
+                "id":          "demo-fallback",
+                "name":        "Demo Project",
+                "description": "Demo project (offline).",
+                "created_at":  datetime.now().isoformat(),
+            }
+
     st.success("🎮 Demo dataset loaded! Exploring 2 years of synthetic sales data.")
 
 
@@ -266,11 +295,11 @@ def _open_project(project_id):
 # ================================================================
 
 def _page_projects():
-    uid = st.session_state.user_id
+    uid     = st.session_state.get("user_id")
     is_demo = st.session_state.get("demo_mode", False)
 
     if is_demo:
-        st.warning("🎮 Project management is not available in Demo Mode. Explore all features with the demo dataset!")
+        st.warning("🎮 Project management is not available in Demo Mode.")
         if st.button("← Back to Dashboard"):
             st.session_state.current_page = "home"
             st.rerun()
@@ -278,7 +307,7 @@ def _page_projects():
 
     st.title("📁 Project Workspace")
 
-    # ── Create new project ────────────────────────────────
+    # ── Create new project ─────────────────────────────────────────
     with st.expander("➕ Create New Project", expanded=False):
         with st.form("new_project"):
             pname = st.text_input("Project Name *", placeholder="Q4 Sales Analysis")
@@ -297,7 +326,7 @@ def _page_projects():
 
     st.divider()
 
-    # ── List projects ─────────────────────────────────────
+    # ── List projects ──────────────────────────────────────────────
     projects = db_get_projects(uid)
     if not projects:
         st.info("No projects yet — create one above or explore the demo.")
@@ -305,26 +334,25 @@ def _page_projects():
 
     st.subheader(f"Your Projects ({len(projects)})")
     for p in projects:
-        with st.container():
-            r1, r2, r3, r4 = st.columns([4, 2, 1, 1])
-            with r1:
-                active = (st.session_state.active_project or {}).get("id") == p["id"]
-                label  = f"{'✅ ' if active else ''}**{p['name']}**"
-                st.markdown(f"{label}  \n{p.get('description','')[:80]}")
-            with r2:
-                st.caption(f"{p.get('dataset_rows',0):,} rows · {p['created_at'][:10]}")
-            with r3:
-                if st.button("Open", key=f"proj_open_{p['id']}", use_container_width=True):
-                    _open_project(p["id"])
-                    st.rerun()
-            with r4:
-                if st.button("🗑️", key=f"proj_del_{p['id']}", help="Delete project"):
-                    db_delete_project(p["id"], uid)
-                    if (st.session_state.active_project or {}).get("id") == p["id"]:
-                        st.session_state.active_project = None
-                        st.session_state.active_df      = None
-                    st.rerun()
-            st.divider()
+        r1, r2, r3, r4 = st.columns([4, 2, 1, 1])
+        active = (st.session_state.get("active_project") or {}).get("id") == p["id"]
+        with r1:
+            label = f"{'✅ ' if active else ''}**{p['name']}**"
+            st.markdown(f"{label}  \n{p.get('description','')[:80]}")
+        with r2:
+            st.caption(f"{p.get('dataset_rows',0):,} rows · {p['created_at'][:10]}")
+        with r3:
+            if st.button("Open", key=f"proj_open_{p['id']}", use_container_width=True):
+                _open_project(p["id"])
+                st.rerun()
+        with r4:
+            if st.button("🗑️", key=f"proj_del_{p['id']}", help="Delete project"):
+                db_delete_project(p["id"], uid)
+                if (st.session_state.get("active_project") or {}).get("id") == p["id"]:
+                    st.session_state.active_project = None
+                    st.session_state.active_df      = None
+                st.rerun()
+        st.divider()
 
 
 # ================================================================
@@ -332,12 +360,12 @@ def _page_projects():
 # ================================================================
 
 def _page_upload():
-    uid  = st.session_state.user_id
+    uid     = st.session_state.get("user_id")
     is_demo = st.session_state.get("demo_mode", False)
-    proj = st.session_state.active_project
+    proj    = st.session_state.get("active_project")
 
     if is_demo:
-        st.warning("🎮 File upload is not available in Demo Mode. Explore all features with the demo dataset!")
+        st.warning("🎮 File upload is not available in Demo Mode.")
         if st.button("← Back to Dashboard"):
             st.session_state.current_page = "home"
             st.rerun()
@@ -354,10 +382,9 @@ def _page_upload():
 
     st.info(f"Active project: **{proj['name']}**")
 
-    # ── File uploader ─────────────────────────────────────
     uploaded = st.file_uploader(
         "Drag & drop or browse — CSV or Excel",
-        type=["csv","xlsx","xls"],
+        type=["csv", "xlsx", "xls"],
         help="Max 200MB. Columns are auto-normalised to lowercase."
     )
 
@@ -365,12 +392,13 @@ def _page_upload():
         with st.spinner("Reading file…"):
             df, err = read_uploaded_file(uploaded)
         if err:
-            st.error(f"❌ {err}"); return
+            st.error(f"❌ {err}")
+            return
 
         st.success(f"✅ Loaded **{uploaded.name}** — {len(df):,} rows × {len(df.columns)} columns")
         st.session_state.demo_mode = False
 
-        # ── Column mapping ────────────────────────────────
+        # ── Column mapping ──────────────────────────────────────────
         st.subheader("🗂️ Column Mapping")
         st.caption("Auto-detected columns are pre-selected. Adjust if needed.")
 
@@ -381,15 +409,15 @@ def _page_upload():
         all_cols     = ["(none)"] + list(df.columns)
 
         mc1, mc2, mc3, mc4 = st.columns(4)
-        date_col    = mc1.selectbox("📅 Date Column *",    all_cols, index=all_cols.index(auto_date)    if auto_date    in all_cols else 0)
-        sales_col   = mc2.selectbox("💰 Sales Column *",   all_cols, index=all_cols.index(auto_sales)   if auto_sales   in all_cols else 0)
-        product_col = mc3.selectbox("📦 Product Column",   all_cols, index=all_cols.index(auto_product) if auto_product in all_cols else 0)
-        region_col  = mc4.selectbox("🗺️ Region Column",    all_cols, index=all_cols.index(auto_region)  if auto_region  in all_cols else 0)
+        date_col    = mc1.selectbox("📅 Date Column *",  all_cols, index=all_cols.index(auto_date)    if auto_date    in all_cols else 0)
+        sales_col   = mc2.selectbox("💰 Sales Column *", all_cols, index=all_cols.index(auto_sales)   if auto_sales   in all_cols else 0)
+        product_col = mc3.selectbox("📦 Product Column", all_cols, index=all_cols.index(auto_product) if auto_product in all_cols else 0)
+        region_col  = mc4.selectbox("🗺️ Region Column",  all_cols, index=all_cols.index(auto_region)  if auto_region  in all_cols else 0)
 
         if date_col == "(none)" or sales_col == "(none)":
             st.warning("Date and Sales columns are required for full analysis.")
 
-        # ── Validation ────────────────────────────────────
+        # ── Validation ──────────────────────────────────────────────
         st.subheader("🔍 Data Validation")
         with st.spinner("Validating…"):
             val = validate_dataset(
@@ -399,23 +427,27 @@ def _page_upload():
             )
 
         score = val["score"]
-        score_col = "success" if score >= 80 else "warning" if score >= 60 else "error"
-        getattr(st, score_col)(f"Data Quality Score: **{score}/100**")
+        if score >= 80:
+            st.success(f"Data Quality Score: **{score}/100**")
+        elif score >= 60:
+            st.warning(f"Data Quality Score: **{score}/100**")
+        else:
+            st.error(f"Data Quality Score: **{score}/100**")
 
-        v1,v2,v3,v4 = st.columns(4)
+        v1, v2, v3, v4 = st.columns(4)
         v1.metric("Missing Values", f"{val['missing_total']:,}")
         v2.metric("Duplicates",     f"{val['duplicates']:,}")
         v3.metric("Outlier Cols",   len(val["outliers"]))
         v4.metric("Total Rows",     f"{val['n_rows']:,}")
 
-        if val["issues"]:
+        if val.get("issues"):
             with st.expander("❌ Issues"):
                 for i in val["issues"]: st.error(f"• {i}")
-        if val["warnings"]:
+        if val.get("warnings"):
             with st.expander("⚠️ Warnings"):
                 for w in val["warnings"]: st.warning(f"• {w}")
 
-        # ── Auto-clean option ─────────────────────────────
+        # ── Auto-clean ──────────────────────────────────────────────
         if val["missing_total"] > 0 or val["duplicates"] > 0:
             if st.checkbox("🧹 Auto-clean dataset (fill missing, remove duplicates)"):
                 with st.spinner("Cleaning…"):
@@ -428,11 +460,11 @@ def _page_upload():
                     st.success("✅ Cleaning applied:")
                     for c in changes: st.markdown(f"  - {c}")
 
-        # ── Preview ───────────────────────────────────────
+        # ── Preview ─────────────────────────────────────────────────
         st.subheader("👁️ Dataset Preview")
         st.dataframe(df.head(50), use_container_width=True)
 
-        # ── Confirm & Save ────────────────────────────────
+        # ── Confirm & Save ───────────────────────────────────────────
         st.divider()
         if st.button("✅ Confirm & Start Analysis", type="primary", use_container_width=True):
             col_map = {
@@ -441,10 +473,9 @@ def _page_upload():
                 "product": product_col if product_col != "(none)" else None,
                 "region":  region_col  if region_col  != "(none)" else None,
             }
-            st.session_state.active_df  = df
-            st.session_state.col_map    = col_map
+            st.session_state.active_df = df
+            st.session_state.col_map   = col_map
 
-            # Save metadata to Supabase
             db_save_dataset(
                 proj["id"], uid, uploaded.name,
                 len(df), len(df.columns),
@@ -480,25 +511,23 @@ def _page_analytics():
         st.error("Date and Sales columns are required. Go to Upload Data to re-configure.")
         return
 
-    # ── KPI Cards ─────────────────────────────────────────
     with st.spinner("Computing KPIs…"):
         kpis = compute_kpis(df, date_col, sales_col)
 
     st.subheader("📊 Key Performance Indicators")
-    k1,k2,k3,k4,k5,k6 = st.columns(6)
-    k1.metric("Total Sales",     fmt_currency(kpis["total_sales"]))
-    k2.metric("Avg per Record",  fmt_currency(kpis["avg_sales"]))
-    k3.metric("Peak Transaction",fmt_currency(kpis["max_sales"]))
-    k4.metric("Transactions",    f"{kpis['transactions']:,}")
-    k5.metric("30-Day Growth",   f"{kpis['growth_pct']:+.1f}%",
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("Total Sales",      fmt_currency(kpis["total_sales"]))
+    k2.metric("Avg per Record",   fmt_currency(kpis["avg_sales"]))
+    k3.metric("Peak Transaction", fmt_currency(kpis["max_sales"]))
+    k4.metric("Transactions",     f"{kpis['transactions']:,}")
+    k5.metric("30-Day Growth",    f"{kpis['growth_pct']:+.1f}%",
               delta=f"{kpis['growth_pct']:+.1f}%",
               delta_color="normal" if kpis["growth_pct"] >= 0 else "inverse")
-    k6.metric("Date Range",      kpis["date_range"].split("→")[0].strip())
+    k6.metric("Date Range", kpis["date_range"].split("→")[0].strip())
 
     st.divider()
 
-    # ── Trend tabs ────────────────────────────────────────
-    t1,t2,t3,t4 = st.tabs(["Daily","Weekly","Monthly","Yearly"])
+    t1, t2, t3, t4 = st.tabs(["Daily", "Weekly", "Monthly", "Yearly"])
 
     with t1:
         daily = daily_trend(df, date_col, sales_col)
@@ -532,8 +561,6 @@ def _page_analytics():
         )
 
     st.divider()
-
-    # ── Seasonal ──────────────────────────────────────────
     st.subheader("🌟 Seasonal Analysis")
     sea = seasonal_analysis(df, date_col, sales_col)
 
@@ -559,7 +586,7 @@ def _page_analytics():
             use_container_width=True
         )
 
-    # Store for other pages
+    # Store computed data for reuse on other pages
     st.session_state["_kpis"]     = kpis
     st.session_state["_seasonal"] = sea
     st.session_state["_monthly"]  = monthly
@@ -578,12 +605,12 @@ def _page_forecasting():
     date_col  = col_map.get("date")
     sales_col = col_map.get("sales")
     if not date_col or not sales_col:
-        st.error("Date and Sales columns are required."); return
+        st.error("Date and Sales columns are required.")
+        return
 
-    uid  = st.session_state.user_id
-    proj = st.session_state.active_project or {}
+    uid  = st.session_state.get("user_id")
+    proj = st.session_state.get("active_project") or {}
 
-    # ── Train models ──────────────────────────────────────
     st.subheader("🤖 Train All Models")
     st.info(
         "Trains **Linear Regression**, **Random Forest**, and **Gradient Boosting** "
@@ -597,57 +624,50 @@ def _page_forecasting():
                 results, feat_cols = train_all_models(daily, date_col)
                 best_name = select_best_model(results)
 
-                st.session_state.trained_models    = results
-                st.session_state["_best_model"]    = best_name
-                st.session_state["_daily_eng"]     = daily
-                st.session_state["_feat_cols"]     = feat_cols
+                st.session_state.trained_models = results
+                st.session_state["_best_model"] = best_name
+                st.session_state["_daily_eng"]  = daily
+                st.session_state["_feat_cols"]  = feat_cols
 
-                # Save to Supabase
-                for mname, res in results.items():
-                    m = res["metrics"]
-                    db_save_metrics(
-                        proj.get("id",""), uid, mname,
-                        m["mae"], m["rmse"], m["r2"], m["mape"],
-                        res["split_idx"], len(daily) - res["split_idx"]
-                    )
+                if proj.get("id") and proj["id"] not in ("demo-project", "demo-fallback"):
+                    for mname, res in results.items():
+                        m = res["metrics"]
+                        db_save_metrics(
+                            proj["id"], uid, mname,
+                            m["mae"], m["rmse"], m["r2"], m["mape"],
+                            res["split_idx"], len(daily) - res["split_idx"]
+                        )
                 st.success(f"✅ All models trained! Best model: **{best_name}**")
             except Exception as e:
                 st.error(f"Training failed: {e}")
                 return
 
-    results    = st.session_state.get("trained_models", {})
-    best_name  = st.session_state.get("_best_model")
+    results   = st.session_state.get("trained_models", {})
+    best_name = st.session_state.get("_best_model")
 
     if not results:
         st.info("Click **Train Models** to begin.")
         return
 
-    # ── Model comparison ──────────────────────────────────
     st.subheader("📊 Model Performance Comparison")
-    metrics_list = [
-        {"model_name": n, **r["metrics"]} for n, r in results.items()
-    ]
+    metrics_list = [{"model_name": n, **r["metrics"]} for n, r in results.items()]
 
     cm1, cm2 = st.columns(2)
     with cm1:
-        metric_sel = st.selectbox("Compare by", ["rmse","mae","r2","mape"], key="cmp_metric")
+        metric_sel = st.selectbox("Compare by", ["rmse", "mae", "r2", "mape"], key="cmp_metric")
         st.plotly_chart(
             model_comparison_chart(metrics_list, metric_sel),
             use_container_width=True
         )
     with cm2:
-        st.dataframe(
-            pd.DataFrame(metrics_list).round(4),
-            use_container_width=True
-        )
+        st.dataframe(pd.DataFrame(metrics_list).round(4), use_container_width=True)
 
-    # ── Model details ─────────────────────────────────────
     for mname, res in results.items():
         is_best = (mname == best_name)
         label   = f"{'🏆 Best — ' if is_best else ''}{mname}"
         with st.expander(label, expanded=is_best):
             m = res["metrics"]
-            mc1,mc2,mc3,mc4 = st.columns(4)
+            mc1, mc2, mc3, mc4 = st.columns(4)
             mc1.metric("MAE",  f"{m['mae']:.2f}")
             mc2.metric("RMSE", f"{m['rmse']:.2f}")
             mc3.metric("R²",   f"{m['r2']:.4f}")
@@ -669,20 +689,13 @@ def _page_forecasting():
             )
 
     st.divider()
-
-    # ── Generate forecast ─────────────────────────────────
     st.subheader("📅 Generate Forecast")
-    fc1, fc2 = st.columns([2,1])
+    fc1, fc2 = st.columns([2, 1])
     with fc1:
-        horizon_name = st.selectbox(
-            "Forecast Horizon",
-            list(FORECAST_HORIZONS.keys()),
-            key="horizon_sel"
-        )
+        horizon_name = st.selectbox("Forecast Horizon", list(FORECAST_HORIZONS.keys()), key="horizon_sel")
     with fc2:
         model_sel = st.selectbox(
-            "Use Model",
-            list(results.keys()),
+            "Use Model", list(results.keys()),
             index=list(results.keys()).index(best_name) if best_name in results else 0,
             key="model_sel"
         )
@@ -691,26 +704,19 @@ def _page_forecasting():
         horizon_days = FORECAST_HORIZONS[horizon_name]
         with st.spinner(f"Forecasting {horizon_days} days…"):
             try:
-                daily_eng = st.session_state.get("_daily_eng")
-                if daily_eng is None:
-                    daily_eng = engineer_features(df, date_col, sales_col)
+                daily_eng = st.session_state.get("_daily_eng") or engineer_features(df, date_col, sales_col)
+                fc_df     = generate_forecast(daily_eng, date_col, results[model_sel], horizon_days)
 
-                fc_df = generate_forecast(daily_eng, date_col, results[model_sel], horizon_days)
-
-                forecast_results = st.session_state.get("forecast_results")
-                if forecast_results is None:
-                    forecast_results = {}
-                    st.session_state.forecast_results = forecast_results
+                forecast_results = st.session_state.get("forecast_results") or {}
                 forecast_results[horizon_name] = fc_df
+                st.session_state.forecast_results = forecast_results
 
-                # Historical for chart
                 hist_daily = daily_eng[[date_col, "daily_sales"]].tail(90).copy()
-                hist_daily.columns = ["date","sales"]
+                hist_daily.columns = ["date", "sales"]
 
                 st.success(f"✅ Forecast ready: {len(fc_df)} days")
                 st.plotly_chart(
-                    forecast_chart(hist_daily, fc_df,
-                                   f"{model_sel} — {horizon_name}"),
+                    forecast_chart(hist_daily, fc_df, f"{model_sel} — {horizon_name}"),
                     use_container_width=True
                 )
 
@@ -724,21 +730,23 @@ def _page_forecasting():
                     st.metric("Avg Daily Forecast",   fmt_currency(fc_df["forecast"].mean()))
                     st.metric("Peak Day",             fmt_currency(fc_df["forecast"].max()))
 
-                st.download_button("⬇️ Download Forecast CSV",
-                                    to_csv_bytes(fc_df),
-                                    f"forecast_{horizon_name.replace(' ','_')}.csv",
-                                    "text/csv")
-
-                # Save forecast to DB
-                db_save_forecast(
-                    proj.get("id",""), uid, model_sel, horizon_name,
-                    results[model_sel]["metrics"]["mae"],
-                    results[model_sel]["metrics"]["rmse"],
-                    results[model_sel]["metrics"]["r2"],
-                    results[model_sel]["metrics"]["mape"],
-                    fc_df.to_json(orient="records"),
-                    is_best=(model_sel == best_name)
+                st.download_button(
+                    "⬇️ Download Forecast CSV",
+                    to_csv_bytes(fc_df),
+                    f"forecast_{horizon_name.replace(' ','_')}.csv",
+                    "text/csv"
                 )
+
+                if proj.get("id") and proj["id"] not in ("demo-project", "demo-fallback"):
+                    db_save_forecast(
+                        proj["id"], uid, model_sel, horizon_name,
+                        results[model_sel]["metrics"]["mae"],
+                        results[model_sel]["metrics"]["rmse"],
+                        results[model_sel]["metrics"]["r2"],
+                        results[model_sel]["metrics"]["mape"],
+                        fc_df.to_json(orient="records"),
+                        is_best=(model_sel == best_name)
+                    )
             except Exception as e:
                 st.error(f"Forecast failed: {e}")
 
@@ -760,18 +768,16 @@ def _page_products():
         st.warning("No product column mapped. Go to Upload Data to set it.")
         return
 
-    res = product_analysis(df, date_col or "date", sales_col, product_col)
+    res     = product_analysis(df, date_col or "date", sales_col, product_col)
     by_prod = res["by_product"]
 
-    # ── Top-level KPIs ────────────────────────────────────
-    p1,p2,p3 = st.columns(3)
-    p1.metric("Total Products",  len(by_prod))
-    p2.metric("Top Product",     str(by_prod.iloc[0][product_col]) if not by_prod.empty else "N/A")
+    p1, p2, p3 = st.columns(3)
+    p1.metric("Total Products", len(by_prod))
+    p2.metric("Top Product",    str(by_prod.iloc[0][product_col]) if not by_prod.empty else "N/A")
     top_share = float(by_prod["share_pct"].iloc[0]) if not by_prod.empty else 0
     p3.metric("Top Product Share", fmt_pct(top_share))
 
     st.divider()
-
     c1, c2 = st.columns(2)
     with c1:
         st.plotly_chart(
@@ -787,7 +793,6 @@ def _page_products():
             use_container_width=True
         )
 
-    # ── Product trend ─────────────────────────────────────
     if not res["prod_trend"].empty:
         st.subheader("📈 Top 5 Products — Monthly Trend")
         st.plotly_chart(
@@ -796,11 +801,9 @@ def _page_products():
             use_container_width=True
         )
 
-    # ── Full table ────────────────────────────────────────
     st.subheader("📋 Product Performance Table")
     st.dataframe(by_prod, use_container_width=True)
-    st.download_button("⬇️ Download CSV", to_csv_bytes(by_prod),
-                        "product_analysis.csv","text/csv")
+    st.download_button("⬇️ Download CSV", to_csv_bytes(by_prod), "product_analysis.csv", "text/csv")
 
 
 # ================================================================
@@ -823,21 +826,20 @@ def _page_regions():
     res       = region_analysis(df, date_col or "date", sales_col, region_col)
     by_region = res["by_region"]
 
-    region_options = ["All Regions"] + list(by_region[region_col].astype(str))
+    region_options  = ["All Regions"] + list(by_region[region_col].astype(str))
     selected_region = st.selectbox("Select region for analysis", region_options)
 
     if selected_region != "All Regions":
         filtered_df = df[df[region_col].astype(str) == selected_region]
-        res = region_analysis(filtered_df, date_col or "date", sales_col, region_col)
-        by_region = res["by_region"]
+        res         = region_analysis(filtered_df, date_col or "date", sales_col, region_col)
+        by_region   = res["by_region"]
 
-    r1,r2,r3 = st.columns(3)
+    r1, r2, r3 = st.columns(3)
     r1.metric("Regions",     len(by_region))
     r2.metric("Top Region",  str(by_region.iloc[0][region_col]) if not by_region.empty else "N/A")
     top_share = float(by_region["share_pct"].iloc[0]) if not by_region.empty else 0
     r3.metric("Top Region Share", fmt_pct(top_share))
 
-    st.info("Select a region from the list above to refresh the regional summary.")
     st.divider()
     rc1, rc2 = st.columns(2)
     with rc1:
@@ -847,14 +849,12 @@ def _page_regions():
         )
     with rc2:
         st.plotly_chart(
-            pie_chart(list(by_region[region_col]), list(by_region["total"]),
-                      "Region Revenue Share"),
+            pie_chart(list(by_region[region_col]), list(by_region["total"]), "Region Revenue Share"),
             use_container_width=True
         )
 
     st.dataframe(by_region, use_container_width=True)
-    st.download_button("⬇️ Download CSV", to_csv_bytes(by_region),
-                        "region_analysis.csv","text/csv")
+    st.download_button("⬇️ Download CSV", to_csv_bytes(by_region), "region_analysis.csv", "text/csv")
 
 
 # ================================================================
@@ -871,40 +871,26 @@ def _page_insights():
     product_col = col_map.get("product")
     region_col  = col_map.get("region")
 
-    kpis = st.session_state.get("_kpis")
-    if not kpis:
-        with st.spinner("Computing analytics…"):
-            kpis = compute_kpis(df, date_col, sales_col)
-        st.session_state["_kpis"] = kpis
+    kpis = st.session_state.get("_kpis") or compute_kpis(df, date_col, sales_col)
+    st.session_state["_kpis"] = kpis
 
-    seasonal = st.session_state.get("_seasonal")
-    if not seasonal:
-        seasonal = seasonal_analysis(df, date_col, sales_col)
-        st.session_state["_seasonal"] = seasonal
+    seasonal = st.session_state.get("_seasonal") or seasonal_analysis(df, date_col, sales_col)
+    st.session_state["_seasonal"] = seasonal
 
-    product_res = None
-    if product_col:
-        product_res = product_analysis(df, date_col, sales_col, product_col)
+    product_res = product_analysis(df, date_col, sales_col, product_col) if product_col else None
+    region_res  = region_analysis(df, date_col, sales_col, region_col)   if region_col  else None
 
-    region_res = None
-    if region_col:
-        region_res = region_analysis(df, date_col, sales_col, region_col)
-
-    # ── Insights ──────────────────────────────────────────
     st.subheader("💡 Business Insights")
     insights = generate_insights(df, date_col, sales_col, kpis, seasonal)
     for ins in insights:
         st.markdown(f"- {ins}")
 
     st.divider()
-
-    # ── Recommendations ───────────────────────────────────
     st.subheader("🎯 AI Recommendations")
     recs = generate_recommendations(kpis, seasonal, product_res, region_res)
     for rec in recs:
         st.info(rec)
 
-    # ── Correlation heatmap ───────────────────────────────
     nc = num_cols(df)
     if len(nc) >= 3:
         st.divider()
@@ -924,7 +910,6 @@ def _page_scenario():
         "your sales forecast. Requires a forecast to be generated first."
     )
 
-    # Check if any forecast is available
     forecast_results = st.session_state.get("forecast_results", {})
     if not forecast_results:
         st.warning("No forecast available. Run the Forecasting module first.")
@@ -933,38 +918,33 @@ def _page_scenario():
             st.rerun()
         return
 
-    horizon = st.selectbox("Select Forecast", list(forecast_results.keys()), key="scen_horizon")
+    horizon  = st.selectbox("Select Forecast", list(forecast_results.keys()), key="scen_horizon")
     baseline = forecast_results[horizon]
 
     st.subheader("⚙️ Adjust Scenario Parameters")
     sc1, sc2, sc3 = st.columns(3)
     with sc1:
-        growth_pct   = st.slider("📈 Sales Growth Change (%)", -30, 50, 0, key="scen_growth",
-                                  help="Simulate a growth or decline in sales rate")
+        growth_pct    = st.slider("📈 Sales Growth Change (%)", -30, 50, 0, key="scen_growth")
     with sc2:
-        demand_change = st.slider("📦 Demand Change (%)",      -20, 40, 0, key="scen_demand",
-                                  help="Increase or decrease customer demand")
+        demand_change = st.slider("📦 Demand Change (%)",       -20, 40, 0, key="scen_demand")
     with sc3:
-        discount_pct  = st.slider("🏷️ Discount Applied (%)",    0,  30, 0, key="scen_discount",
-                                  help="Simulate offering discounts to customers")
+        discount_pct  = st.slider("🏷️ Discount Applied (%)",     0,  30, 0, key="scen_discount")
 
     scenario_df = run_scenario(baseline, growth_pct, demand_change, discount_pct)
 
     st.divider()
     st.subheader("📊 Scenario Results")
-
-    base_total  = float(baseline["forecast"].sum())
-    scen_total  = float(scenario_df["scenario_sales"].sum())
-    diff_total  = scen_total - base_total
+    base_total = float(baseline["forecast"].sum())
+    scen_total = float(scenario_df["scenario_sales"].sum())
+    diff_total = scen_total - base_total
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Baseline Forecast",  fmt_currency(base_total))
-    m2.metric("Scenario Forecast",  fmt_currency(scen_total),
+    m1.metric("Baseline Forecast", fmt_currency(base_total))
+    m2.metric("Scenario Forecast", fmt_currency(scen_total),
               delta=f"{fmt_currency(diff_total)} ({diff_total/max(base_total,1)*100:+.1f}%)",
               delta_color="normal" if diff_total >= 0 else "inverse")
-    m3.metric("Net Impact",         fmt_currency(diff_total))
+    m3.metric("Net Impact", fmt_currency(diff_total))
 
-    # Combined chart
     import plotly.graph_objects as go
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=scenario_df["date"], y=scenario_df["forecast"],
@@ -992,8 +972,8 @@ def _page_scenario():
 
 def _page_reports():
     st.title("📋 Reports")
-    uid  = st.session_state.user_id
-    proj = st.session_state.active_project or {}
+    uid  = st.session_state.get("user_id")
+    proj = st.session_state.get("active_project") or {}
     df, col_map = _get_df_or_warn(silent=True)
 
     tab1, tab2 = st.tabs(["📥 Generate Reports", "📄 Report History"])
@@ -1006,11 +986,9 @@ def _page_reports():
         date_col  = col_map.get("date")
         sales_col = col_map.get("sales")
 
-        kpis    = st.session_state.get("_kpis")
-        monthly = st.session_state.get("_monthly")
-        seasonal= st.session_state.get("_seasonal", {})
-        insights= []
-        recs    = []
+        kpis     = st.session_state.get("_kpis")
+        monthly  = st.session_state.get("_monthly")
+        seasonal = st.session_state.get("_seasonal", {})
 
         if kpis and seasonal:
             insights = generate_insights(df, date_col, sales_col, kpis, seasonal)
@@ -1021,14 +999,14 @@ def _page_reports():
             insights = generate_insights(df, date_col, sales_col, kpis, seasonal)
             recs     = generate_recommendations(kpis, seasonal, None, None)
             monthly  = monthly_trend(df, date_col, sales_col)
+        else:
+            insights, recs = [], []
 
         forecast_results = st.session_state.get("forecast_results", {})
         forecast_df      = list(forecast_results.values())[0] if forecast_results else None
 
-        metrics = st.session_state.get("trained_models")
-        metrics_list = None
-        if metrics:
-            metrics_list = [{"model_name": n, **r["metrics"]} for n, r in metrics.items()]
+        metrics      = st.session_state.get("trained_models")
+        metrics_list = [{"model_name": n, **r["metrics"]} for n, r in metrics.items()] if metrics else None
 
         r1, r2, r3 = st.columns(3)
 
@@ -1038,7 +1016,7 @@ def _page_reports():
                 with st.spinner("Generating PDF…"):
                     try:
                         pdf_bytes = generate_pdf_report(
-                            proj.get("name","Project"),
+                            proj.get("name", "Project"),
                             kpis or {}, monthly, forecast_df,
                             insights, recs, metrics_list
                         )
@@ -1049,9 +1027,9 @@ def _page_reports():
                             "application/pdf",
                             key="dl_pdf"
                         )
-                        db_save_report(proj.get("id",""), uid,
-                                        "Sales Analytics Report", "pdf",
-                                        f"Generated {now_str()}")
+                        if proj.get("id") and proj["id"] not in ("demo-project", "demo-fallback"):
+                            db_save_report(proj["id"], uid, "Sales Analytics Report", "pdf",
+                                            f"Generated {now_str()}")
                         st.success("✅ PDF ready!")
                     except Exception as e:
                         st.error(f"PDF generation failed: {e}")
@@ -1061,9 +1039,9 @@ def _page_reports():
             if st.button("Generate Excel", use_container_width=True, key="gen_excel"):
                 with st.spinner("Generating Excel…"):
                     try:
-                        daily = st.session_state.get("_daily")
+                        daily      = st.session_state.get("_daily")
                         xlsx_bytes = generate_excel_report(
-                            proj.get("name","Project"),
+                            proj.get("name", "Project"),
                             kpis or {}, monthly, forecast_df,
                             daily, metrics_list
                         )
@@ -1074,9 +1052,9 @@ def _page_reports():
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             key="dl_xlsx"
                         )
-                        db_save_report(proj.get("id",""), uid,
-                                        "Sales Analytics Report", "excel",
-                                        f"Generated {now_str()}")
+                        if proj.get("id") and proj["id"] not in ("demo-project", "demo-fallback"):
+                            db_save_report(proj["id"], uid, "Sales Analytics Report", "excel",
+                                            f"Generated {now_str()}")
                         st.success("✅ Excel ready!")
                     except Exception as e:
                         st.error(f"Excel generation failed: {e}")
@@ -1090,12 +1068,16 @@ def _page_reports():
                     f"dataset_{datetime.now().strftime('%Y%m%d')}.csv",
                     "text/csv", key="dl_csv"
                 )
-                db_save_report(proj.get("id",""), uid,
-                                "Dataset CSV Export", "csv",
-                                f"Generated {now_str()}")
+                if proj.get("id") and proj["id"] not in ("demo-project", "demo-fallback"):
+                    db_save_report(proj["id"], uid, "Dataset CSV Export", "csv",
+                                    f"Generated {now_str()}")
 
     with tab2:
-        reports = db_get_reports(proj.get("id",""))
+        proj_id = proj.get("id", "")
+        if proj_id in ("demo-project", "demo-fallback", ""):
+            st.info("Report history is only available for saved projects.")
+            return
+        reports = db_get_reports(proj_id)
         if not reports:
             st.info("No reports generated yet.")
         else:
@@ -1112,20 +1094,22 @@ def _page_reports():
 
 def _page_settings():
     st.title("⚙️ Settings")
-    uid  = st.session_state.user_id
+    uid = st.session_state.get("user_id")
 
     tab1, tab2, tab3 = st.tabs(["👤 Profile", "🗄️ Dataset Info", "👑 Admin"])
 
     with tab1:
         st.subheader("Account Information")
-        st.markdown(f"**Name:** {st.session_state.full_name}")
-        st.markdown(f"**Email:** {st.session_state.email}")
-        st.markdown(f"**Role:** {(st.session_state.role or 'analyst').title()}")
+        st.markdown(f"**Name:** {st.session_state.get('full_name', 'N/A')}")
+        st.markdown(f"**Email:** {st.session_state.get('email', 'N/A')}")
+        st.markdown(f"**Role:** {(st.session_state.get('role') or 'analyst').title()}")
         st.markdown(f"**User ID:** `{uid}`")
+        if st.session_state.get("demo_mode"):
+            st.info("🎮 You are in Demo Mode. Register or log in for full features.")
 
     with tab2:
-        proj = st.session_state.active_project
-        if proj:
+        proj = st.session_state.get("active_project")
+        if proj and proj.get("id") not in ("demo-project", "demo-fallback"):
             ds = db_get_dataset(proj["id"])
             if ds:
                 st.subheader("Active Dataset Info")
@@ -1136,9 +1120,12 @@ def _page_settings():
                 try:
                     cols = json.loads(ds["columns_json"])
                     st.markdown(f"**Columns:** {', '.join(cols)}")
-                except: pass
+                except Exception:
+                    pass
             else:
                 st.info("No dataset metadata found.")
+        elif proj:
+            st.info("Demo dataset is in-memory only — no database metadata.")
         else:
             st.info("No active project.")
 
@@ -1149,12 +1136,12 @@ def _page_settings():
         st.subheader("User Management (Admin)")
         users = db_get_all_users()
         for u in users:
-            uc1, uc2, uc3 = st.columns([3,2,2])
+            uc1, uc2, uc3 = st.columns([3, 2, 2])
             uc1.markdown(f"**{u['email']}**  \n{u['full_name']}")
             uc2.caption(u["role"].title())
             new_role = uc3.selectbox(
-                "Change Role", ["analyst","admin"],
-                index=0 if u["role"]=="analyst" else 1,
+                "Change Role", ["analyst", "admin"],
+                index=0 if u["role"] == "analyst" else 1,
                 key=f"role_{u['id']}"
             )
             if new_role != u["role"]:
@@ -1171,7 +1158,7 @@ def _page_settings():
 def _get_df_or_warn(silent=False):
     """Return (df, col_map) or (None, None) with a warning."""
     df      = st.session_state.get("active_df")
-    col_map = st.session_state.get("col_map", {})
+    col_map = st.session_state.get("col_map") or {}
     if df is None and not silent:
         st.info(
             "📤 No dataset loaded.  \n"
