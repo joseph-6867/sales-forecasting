@@ -366,8 +366,11 @@ def _upsert_user_record(user_id, email, full_name, role, avatar_url=""):
             role=role,
             avatar_url=avatar_url,
         )
+        print(f"[auth] upsert_user OK: {email}")
     except Exception as e:
-        print(f"[auth] upsert_user warning: {e}")
+        import traceback
+        print(f"[auth] upsert_user FAILED for {email}: {e}")
+        traceback.print_exc()
 
 
 def _set_session_from_supabase(user, session):
