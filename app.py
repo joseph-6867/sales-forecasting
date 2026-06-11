@@ -24,11 +24,9 @@ _DEFAULTS = {
     "jwt_token":         None,
     "demo_mode":         False,
     "current_page":      "home",
-    # Dashboard keys not in init_session()
     "active_project":    None,
     "active_df":         None,
     "col_map":           {},
-    # Misc
     "register_cooldown": 0,
     "trained_models":    None,
     "forecast_results":  {},
@@ -52,6 +50,7 @@ from backend.auth import (
     auth_forgot_password,
     auth_google_login_url,
     auth_handle_google_callback,
+    inject_fragment_listener,
 )
 from frontend.dashboard import render_dashboard
 
@@ -63,10 +62,6 @@ init_session()
 # ================================================================
 
 def _google_button(label: str):
-    """
-    Renders the Google OAuth button using st.link_button (Streamlit >= 1.27).
-    Falls back to a safe HTML anchor for older Streamlit versions.
-    """
     try:
         google_url = auth_google_login_url()
     except Exception as exc:
@@ -103,7 +98,12 @@ def _google_button(label: str):
 # ================================================================
 
 def _auth_page():
-    # Handle Google OAuth callback BEFORE any UI renders
+    # ── STEP 1: Inject JS to bridge URL fragment → query params ──
+    # Must run BEFORE handle_google_callback so the token is
+    # already in query params when Python checks for it.
+    inject_fragment_listener()
+
+    # ── STEP 2: Check if callback just fired ─────────────────────
     if auth_handle_google_callback():
         st.rerun()
 
@@ -221,13 +221,8 @@ def _auth_page():
                     msg = result["message"] if isinstance(result, dict) else result
                     if ok:
                         st.success(msg)
-                        # ✅ BUG 2 FIX: Only rerun (auto-login) if session was created.
-                        # With email confirmation OFF, auto_login=True and session is set.
-                        # With email confirmation ON,  auto_login=False — show the message
-                        # and stay on the page so user can go confirm their email first.
                         if result.get("auto_login", False):
                             st.rerun()
-                        # else: stay on page, success message already shown above
                     else:
                         st.error(msg)
 
