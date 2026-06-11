@@ -15,7 +15,7 @@ from datetime import datetime
 
 from backend.auth        import auth_logout, is_admin
 from backend.database    import (db_create_project, db_get_projects, db_get_project,
-                                  db_update_project, db_delete_project,
+                                  db_update_project, db_delete_project, db_hard_delete_project,
                                   db_save_dataset, db_get_dataset,
                                   db_save_forecast, db_get_forecasts,
                                   db_save_metrics, db_get_metrics,
@@ -334,24 +334,45 @@ def _page_projects():
 
     st.subheader(f"Your Projects ({len(projects)})")
     for p in projects:
+        pid = p["id"]
+        confirm_key = f"confirm_del_{pid}"
+
         r1, r2, r3, r4 = st.columns([4, 2, 1, 1])
-        active = (st.session_state.get("active_project") or {}).get("id") == p["id"]
+        active = (st.session_state.get("active_project") or {}).get("id") == pid
         with r1:
             label = f"{'✅ ' if active else ''}**{p['name']}**"
             st.markdown(f"{label}  \n{p.get('description','')[:80]}")
         with r2:
             st.caption(f"{p.get('dataset_rows',0):,} rows · {p['created_at'][:10]}")
         with r3:
-            if st.button("Open", key=f"proj_open_{p['id']}", use_container_width=True):
-                _open_project(p["id"])
+            if st.button("Open", key=f"proj_open_{pid}", use_container_width=True):
+                _open_project(pid)
                 st.rerun()
         with r4:
-            if st.button("🗑️", key=f"proj_del_{p['id']}", help="Delete project"):
-                db_delete_project(p["id"], uid)
-                if (st.session_state.get("active_project") or {}).get("id") == p["id"]:
-                    st.session_state.active_project = None
-                    st.session_state.active_df      = None
-                st.rerun()
+            if not st.session_state.get(confirm_key):
+                if st.button("🗑️", key=f"proj_del_{pid}", help="Delete project", use_container_width=True):
+                    st.session_state[confirm_key] = True
+                    st.rerun()
+            else:
+                st.warning(f"**Delete '{p['name']}'?** This permanently removes the project and all its data.")
+                ca, cb = st.columns(2)
+                with ca:
+                    if st.button("✅ Yes, delete", key=f"proj_del_confirm_{pid}", type="primary", use_container_width=True):
+                        ok, err = db_hard_delete_project(pid, uid)
+                        st.session_state.pop(confirm_key, None)
+                        if ok:
+                            if (st.session_state.get("active_project") or {}).get("id") == pid:
+                                st.session_state.active_project = None
+                                st.session_state.active_df      = None
+                            st.success(f"🗑️ Project '{p['name']}' deleted.")
+                        else:
+                            st.error(f"Delete failed: {err}")
+                        st.rerun()
+                with cb:
+                    if st.button("❌ Cancel", key=f"proj_del_cancel_{pid}", use_container_width=True):
+                        st.session_state.pop(confirm_key, None)
+                        st.rerun()
+
         st.divider()
 
 
