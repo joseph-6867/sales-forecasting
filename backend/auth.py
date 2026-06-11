@@ -402,6 +402,26 @@ def is_auth() -> bool:
     return bool(st.session_state.get("authenticated"))
 
 
+def is_admin() -> bool:
+    """Return True if the logged-in user has the admin role."""
+    return (
+        bool(st.session_state.get("authenticated")) and
+        st.session_state.get("role") == "admin"
+    )
+
+
+def get_current_user() -> dict:
+    """Return a dict of the current user's session data (safe to pass around)."""
+    return {
+        "user_id":   st.session_state.get("user_id"),
+        "email":     st.session_state.get("email"),
+        "full_name": st.session_state.get("full_name"),
+        "role":      st.session_state.get("role", "analyst"),
+        "jwt_token": st.session_state.get("jwt_token"),
+        "demo_mode": st.session_state.get("demo_mode", False),
+    }
+
+
 # ── Helpers ──────────────────────────────────────────────────────
 
 def _set_session_from_supabase(user, session):
