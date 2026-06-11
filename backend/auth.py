@@ -3,6 +3,7 @@
 # ================================================================
 
 import os
+import urllib.parse
 import streamlit as st
 from supabase import create_client, Client
 
@@ -155,17 +156,13 @@ def _get_supabase_url():
 
 
 # ── Google OAuth ─────────────────────────────────────────────────
-# Strategy: redirect_to points directly back to the Streamlit app.
-# Supabase appends #access_token=... to the URL (implicit flow).
-# A small JS snippet in the page converts the fragment to ?st_access_token=
-# so Streamlit can read it as a query param.
 
 def auth_google_login_url():
     """
-    Build the Supabase OAuth URL.
-    redirect_to = your Streamlit app URL (Supabase will append the token fragment there).
+    Redirect back directly to the Streamlit app.
+    Supabase will append #access_token=... to that URL (implicit flow).
+    streamlit-url-fragment reads the fragment before Streamlit renders.
     """
-    import urllib.parse
     redirect_to = _get_site_url().rstrip("/") + "/"
     params = urllib.parse.urlencode({
         "provider":    "google",
@@ -175,74 +172,59 @@ def auth_google_login_url():
     return f"{_get_supabase_url().rstrip('/')}/auth/v1/authorize?{params}"
 
 
-def inject_oauth_fragment_handler():
-    """
-    Inject a JS snippet once per page load.
-    If the URL contains #access_token=..., convert it to ?st_access_token=
-    so Streamlit picks it up as a query param on the next render.
-    This is needed because Streamlit cannot read URL fragments server-side.
-    """
-    st.components.v1.html(
-        """
-        <script>
-        (function() {
-            var hash = window.location.hash;
-            if (!hash) return;
-
-            var params = {};
-            hash.substring(1).split('&').forEach(function(part) {
-                var kv = part.split('=');
-                if (kv.length === 2) params[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1]);
-            });
-
-            var accessToken = params['access_token'];
-            if (!accessToken) return;
-
-            // Already converted — avoid infinite loop
-            if (window.location.search.indexOf('st_access_token') !== -1) return;
-
-            // Build new URL with token as query param so Streamlit can read it
-            var newUrl = window.location.origin + window.location.pathname
-                + '?st_access_token=' + encodeURIComponent(accessToken)
-                + '&token_type=' + encodeURIComponent(params['token_type'] || 'bearer');
-            window.location.replace(newUrl);
-        })();
-        </script>
-        """,
-        height=0,
-    )
-
-
 def auth_handle_google_callback() -> bool:
     """
-    1. Always inject the JS fragment handler so tokens in the URL hash get
-       converted to query params on first load.
-    2. Then check for ?st_access_token= and log the user in.
-    3. Also handles ?code= (PKCE) as a fallback.
+    Uses streamlit-url-fragment to read #access_token= from the URL fragment.
+    This is the ONLY reliable way to read URL fragments in Streamlit — the
+    library renders a tiny hidden component that passes the fragment to Python
+    before the page finishes loading.
+
     Returns True if login succeeded (caller should st.rerun()).
     """
-    # Step 1: always inject fragment→query-param converter
-    inject_oauth_fragment_handler()
-
+    # ── First check plain query params (fallback / PKCE code) ────
     params = st.query_params
 
-    # ── Explicit error ────────────────────────────────────────────
     if params.get("error"):
         st.error(f"Google sign-in failed: {params.get('error_description', params.get('error'))}")
         st.query_params.clear()
         return False
 
-    # ── Path 1: implicit — token in query param (set by JS above) ─
-    access_token = params.get("st_access_token")
-    if access_token:
-        return _login_with_token(access_token)
-
-    # ── Path 2: PKCE code exchange (fallback) ─────────────────────
+    # PKCE code exchange fallback
     code = params.get("code")
     if code:
         return _exchange_code(code)
 
-    return False
+    # ── Read URL fragment via streamlit-url-fragment ──────────────
+    try:
+        from streamlit_url_fragment import get_fragment
+        fragment = get_fragment()
+    except ImportError:
+        st.error("Missing dependency: run `pip install streamlit-url-fragment`")
+        return False
+
+    # get_fragment() returns None while the component hasn't responded yet
+    # (first render). Streamlit will rerun automatically once it has a value.
+    if fragment is None:
+        return False
+
+    if not fragment:
+        return False
+
+    # Parse the fragment: access_token=...&refresh_token=...&token_type=bearer
+    frag = fragment.lstrip("#")
+    frag_params = dict(urllib.parse.parse_qsl(frag))
+
+    access_token = frag_params.get("access_token")
+    if not access_token:
+        return False
+
+    # Clear the fragment from the URL so it doesn't loop
+    try:
+        st.query_params.clear()
+    except Exception:
+        pass
+
+    return _login_with_token(access_token)
 
 
 def _login_with_token(access_token: str) -> bool:
@@ -251,18 +233,15 @@ def _login_with_token(access_token: str) -> bool:
         user_res  = supabase.auth.get_user(access_token)
         if not user_res or not user_res.user:
             st.error("Google sign-in: token invalid or expired. Please try again.")
-            st.query_params.clear()
             return False
 
         class _Sess:
             def __init__(self, t): self.access_token = t
 
         _set_session_from_supabase(user_res.user, _Sess(access_token))
-        st.query_params.clear()
         return True
     except Exception as e:
         st.error(f"Google sign-in error: {e}")
-        st.query_params.clear()
         return False
 
 
@@ -282,17 +261,17 @@ def _exchange_code(code: str) -> bool:
             json={"code": code},
             timeout=15,
         )
-
         if resp.status_code == 200:
             data = resp.json()
             access_token = data.get("access_token")
             if access_token:
+                st.query_params.clear()
                 return _login_with_token(access_token)
 
         st.error(
             f"Code exchange failed (HTTP {resp.status_code}). "
             "In Supabase Dashboard → Authentication → URL Configuration, "
-            "ensure Auth Flow is set to **Implicit** (not PKCE)."
+            "ensure your Streamlit app URL is in the Redirect URLs list."
         )
         st.query_params.clear()
         return False
