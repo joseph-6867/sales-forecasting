@@ -3,6 +3,9 @@
 # ================================================================
 
 import os
+import hashlib
+import base64
+import secrets
 import streamlit as st
 from supabase import create_client, Client
 
@@ -88,6 +91,21 @@ def _set_session_from_supabase(user, session):
     st.session_state.col_map        = {}
 
 
+# ── PKCE helpers ─────────────────────────────────────────────────
+
+def _generate_pkce_pair() -> tuple[str, str]:
+    """
+    Generate a PKCE code_verifier and code_challenge pair.
+    - code_verifier : 32 random bytes → base64url (no padding)
+    - code_challenge: SHA-256(verifier) → base64url (no padding)
+    This mirrors what Supabase JS does in the browser.
+    """
+    code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
+    digest = hashlib.sha256(code_verifier.encode()).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    return code_verifier, code_challenge
+
+
 # ── Email / Password auth ────────────────────────────────────────
 
 def auth_register(email: str, password: str, full_name: str, role: str = "analyst"):
@@ -166,7 +184,7 @@ def auth_logout():
         "trained_models", "forecast_results",
         "_kpis", "_seasonal", "_monthly", "_daily",
         "_daily_eng", "_feat_cols", "_best_model",
-        "_oauth_code_verifier", "_oauth_debug",
+        "_oauth_code_verifier",
     ]
     for key in keys_to_clear:
         st.session_state.pop(key, None)
@@ -189,115 +207,60 @@ def _get_site_url() -> str:
     return url or "https://deploy-financial66.streamlit.app/"
 
 
-def _debug_storage(supabase, label: str) -> dict:
-    """
-    Introspects every attribute of supabase.auth looking for the PKCE
-    code verifier. Returns a dict of findings for display in the UI.
-    """
-    findings = {"label": label, "keys_found": [], "verifier": None}
+def _get_supabase_url() -> str:
     try:
-        auth = supabase.auth
-
-        # 1. Direct _storage attribute
-        if hasattr(auth, "_storage"):
-            storage = auth._storage
-            findings["storage_type"] = type(storage).__name__
-
-            # Try known keys
-            for key in [
-                "supabase.auth.code_verifier",
-                "code_verifier",
-                "pkce_code_verifier",
-                "code-verifier",
-            ]:
-                try:
-                    val = storage.get_item(key)
-                    findings["keys_found"].append(f"get_item({key!r}) = {val!r}")
-                    if val:
-                        findings["verifier"] = val
-                except Exception as ex:
-                    findings["keys_found"].append(f"get_item({key!r}) ERROR: {ex}")
-
-            # Dump internal dict if possible
-            for attr in ["_storage", "_data", "store", "data", "__dict__"]:
-                if hasattr(storage, attr):
-                    try:
-                        d = getattr(storage, attr)
-                        if isinstance(d, dict):
-                            findings[f"storage.{attr}"] = dict(d)
-                    except Exception as ex:
-                        findings[f"storage.{attr}_err"] = str(ex)
-
-        # 2. Check auth.__dict__ for anything verifier-ish
-        for k, v in vars(auth).items():
-            if any(word in k.lower() for word in ["verif", "pkce", "code", "challenge"]):
-                findings[f"auth.{k}"] = repr(v)[:200]
-
-        # 3. Check auth._flow_type or similar
-        for attr in ["_flow_type", "flow_type", "_pkce", "pkce"]:
-            if hasattr(auth, attr):
-                findings[f"auth.{attr}"] = repr(getattr(auth, attr))
-
-    except Exception as ex:
-        findings["error"] = str(ex)
-
-    return findings
+        return st.secrets.get("SUPABASE_URL", "") or os.environ.get("SUPABASE_URL", "")
+    except Exception:
+        return os.environ.get("SUPABASE_URL", "")
 
 
 def auth_google_login_url() -> str:
-    supabase = _get_supabase()
-    site_url = _get_site_url()
+    """
+    Builds the Google OAuth URL manually with our own PKCE pair.
 
-    # DEBUG: snapshot storage BEFORE OAuth call
-    pre = _debug_storage(supabase, "BEFORE sign_in_with_oauth")
+    WHY MANUAL:
+      supabase-py generates the verifier inside sign_in_with_oauth() and
+      stores it in SyncMemoryStorage — which is tied to that client instance.
+      When the browser redirects back, a brand-new client is created and the
+      storage is empty. The verifier is lost and exchange_code_for_session fails.
 
-    res = supabase.auth.sign_in_with_oauth({
-        "provider": "google",
-        "options": {
-            "redirect_to": site_url,
-            "scopes":      "email profile",
-        },
+    THE FIX:
+      We generate the PKCE pair ourselves in Python, save the verifier to
+      st.session_state (which survives the redirect on Streamlit Cloud), and
+      build the Supabase OAuth URL directly — bypassing the client's storage.
+    """
+    import urllib.parse
+
+    supabase_url = _get_supabase_url().rstrip("/")
+    site_url     = _get_site_url()
+
+    # Generate our own PKCE pair and save verifier to session_state
+    code_verifier, code_challenge = _generate_pkce_pair()
+    st.session_state["_oauth_code_verifier"] = code_verifier
+
+    # Build the Supabase OAuth authorize URL directly
+    params = urllib.parse.urlencode({
+        "provider":              "google",
+        "redirect_to":           site_url,
+        "scopes":                "email profile",
+        "code_challenge":        code_challenge,
+        "code_challenge_method": "S256",
     })
 
-    if not res.url:
-        raise RuntimeError(
-            "Supabase returned an empty OAuth URL. "
-            "Check that Google provider is enabled in Supabase → Auth → Providers."
-        )
-
-    # DEBUG: snapshot storage AFTER OAuth call
-    post = _debug_storage(supabase, "AFTER sign_in_with_oauth")
-
-    # Try every possible location for the verifier
-    verifier = None
-
-    # From post-call storage scan
-    if post.get("verifier"):
-        verifier = post["verifier"]
-
-    # From res object itself
-    if not verifier and hasattr(res, "code_verifier"):
-        verifier = res.code_verifier
-
-    # From auth object attributes
-    if not verifier:
-        auth = supabase.auth
-        for attr in ["_code_verifier", "code_verifier", "_pkce_code_verifier"]:
-            val = getattr(auth, attr, None)
-            if val:
-                verifier = val
-                break
-
-    st.session_state["_oauth_code_verifier"] = verifier
-    st.session_state["_oauth_debug"] = {"pre": pre, "post": post, "verifier_found": verifier is not None}
-
-    return res.url
+    oauth_url = f"{supabase_url}/auth/v1/authorize?{params}"
+    return oauth_url
 
 
 def auth_handle_google_callback() -> bool:
+    """
+    Exchanges the ?code= from Supabase with our saved PKCE verifier.
+
+    Because we generated the verifier ourselves and stored it in
+    st.session_state, it survives the browser redirect and is available
+    here to complete the PKCE exchange via the Supabase token endpoint.
+    """
     params = st.query_params
 
-    # Supabase error
     error = params.get("error")
     if error:
         desc = params.get("error_description", error)
@@ -309,70 +272,78 @@ def auth_handle_google_callback() -> bool:
     if not code:
         return False
 
-    # ── Show debug panel ─────────────────────────────────────────
-    debug = st.session_state.get("_oauth_debug", {})
     verifier = st.session_state.get("_oauth_code_verifier")
+    if not verifier:
+        st.error(
+            "Sign-in session expired — the PKCE verifier was not found. "
+            "This can happen if you opened the Google login in a different browser tab. "
+            "Please try again in the same tab."
+        )
+        st.query_params.clear()
+        return False
 
-    with st.expander("🔍 OAuth Debug Info (share this with developer)", expanded=True):
-        st.write(f"**?code present:** `{code[:12]}...`")
-        st.write(f"**Verifier in session_state:** `{verifier is not None}` → `{str(verifier)[:40] if verifier else 'None'}`")
-        st.write(f"**Verifier found during URL generation:** `{debug.get('verifier_found')}`")
-        if debug:
-            st.write("**Storage scan BEFORE oauth call:**")
-            st.json(debug.get("pre", {}))
-            st.write("**Storage scan AFTER oauth call:**")
-            st.json(debug.get("post", {}))
-
-    # ── Attempt exchange ─────────────────────────────────────────
+    # Exchange code + verifier directly via Supabase token endpoint
+    import httpx
+    supabase_url = _get_supabase_url().rstrip("/")
     try:
-        supabase = _get_supabase()
+        url = st.secrets.get("SUPABASE_URL", "") or os.environ.get("SUPABASE_URL", "")
+        key = st.secrets.get("SUPABASE_ANON_KEY", "") or os.environ.get("SUPABASE_ANON_KEY", "")
+    except Exception:
+        url = os.environ.get("SUPABASE_URL", "")
+        key = os.environ.get("SUPABASE_ANON_KEY", "")
 
-        # Restore verifier into all possible storage slots
-        if verifier:
-            try:
-                storage = supabase.auth._storage
-                for key in ["supabase.auth.code_verifier", "code_verifier", "pkce_code_verifier"]:
-                    try:
-                        storage.set_item(key, verifier)
-                    except Exception:
-                        pass
-                for attr in ["_storage", "_data", "store", "data"]:
-                    d = getattr(storage, attr, None)
-                    if isinstance(d, dict):
-                        d["supabase.auth.code_verifier"] = verifier
-                        d["code_verifier"] = verifier
-            except Exception as ex:
-                st.warning(f"⚠️ Could not restore verifier to storage: {ex}")
+    try:
+        resp = httpx.post(
+            f"{supabase_url}/auth/v1/token?grant_type=pkce",
+            headers={
+                "apikey":       key,
+                "Content-Type": "application/json",
+            },
+            json={
+                "auth_code":     code,
+                "code_verifier": verifier,
+            },
+            timeout=15,
+        )
 
-            # Also try setting directly on auth object
-            for attr in ["_code_verifier", "code_verifier"]:
-                try:
-                    setattr(supabase.auth, attr, verifier)
-                except Exception:
-                    pass
-
-        # Debug: snapshot storage just before exchange
-        pre_exchange = _debug_storage(supabase, "BEFORE exchange_code_for_session")
-        with st.expander("🔍 Storage BEFORE exchange", expanded=True):
-            st.json(pre_exchange)
-
-        res = supabase.auth.exchange_code_for_session({"auth_code": code})
-
-        if res.user and res.session:
-            _set_session_from_supabase(res.user, res.session)
+        if resp.status_code != 200:
+            st.error(f"Google sign-in failed (HTTP {resp.status_code}): {resp.text}")
+            st.query_params.clear()
             st.session_state.pop("_oauth_code_verifier", None)
-            st.session_state.pop("_oauth_debug", None)
-            st.query_params.clear()
-            return True
-        else:
-            st.error("Exchange returned no user/session. Please try again.")
-            st.query_params.clear()
             return False
 
+        data = resp.json()
+        access_token  = data.get("access_token")
+        refresh_token = data.get("refresh_token")
+
+        if not access_token:
+            st.error(f"Google sign-in: no access token in response. Response: {data}")
+            st.query_params.clear()
+            st.session_state.pop("_oauth_code_verifier", None)
+            return False
+
+        # Get user info from the token
+        supabase = _get_supabase()
+        user_res = supabase.auth.get_user(access_token)
+
+        if not user_res.user:
+            st.error("Google sign-in: could not retrieve user from token.")
+            st.query_params.clear()
+            st.session_state.pop("_oauth_code_verifier", None)
+            return False
+
+        class _Session:
+            def __init__(self, token):
+                self.access_token = token
+
+        _set_session_from_supabase(user_res.user, _Session(access_token))
+        st.session_state.pop("_oauth_code_verifier", None)
+        st.query_params.clear()
+        return True
+
     except Exception as e:
-        st.error(f"**Exchange error:** `{e}`")
-        st.write(f"**Full exception type:** `{type(e).__name__}`")
         import traceback
+        st.error(f"Google sign-in error: {e}")
         st.code(traceback.format_exc(), language="python")
         st.query_params.clear()
         st.session_state.pop("_oauth_code_verifier", None)
