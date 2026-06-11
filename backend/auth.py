@@ -24,7 +24,18 @@ def _get_supabase() -> Client:
             'SUPABASE_URL = "https://..."\n'
             'SUPABASE_ANON_KEY = "eyJ..."'
         )
-    return create_client(url, key)
+
+    # ✅ KEY FIX: flow_type="implicit" tells supabase-py NOT to generate a
+    # PKCE code verifier. Without this, the Python client defaults to PKCE,
+    # which needs a browser-side verifier Python can never provide — causing
+    # "both auth code and code verifier should be non-empty" error.
+    # There is NO dashboard toggle; this must be set in the client options.
+    try:
+        from supabase.lib.client_options import ClientOptions
+        return create_client(url, key, options=ClientOptions(flow_type="implicit"))
+    except Exception:
+        # Fallback for older supabase-py versions that don't support flow_type
+        return create_client(url, key)
 
 
 # ── Session initialisation ───────────────────────────────────────
@@ -100,12 +111,9 @@ def auth_register(email: str, password: str, full_name: str, role: str = "analys
         })
         if res.user:
             if res.session:
-                # ✅ Email confirmation OFF — session is immediately available
                 _set_session_from_supabase(res.user, res.session)
                 return True, {"message": "Account created successfully! Welcome 🎉", "auto_login": True}
             else:
-                # Email confirmation ON — session is None, do NOT set authenticated
-                # (With confirm OFF this branch should not be reached)
                 return True, {
                     "message": (
                         "✅ Account created! Check your email to confirm your address, "
@@ -141,7 +149,6 @@ def auth_login(email: str, password: str):
         return False, {"message": "Login failed. Check your credentials."}
     except Exception as e:
         msg = str(e)
-        # ✅ BUG 2 FIX: catch "email not confirmed" before generic handler
         if "email not confirmed" in msg.lower() or "not confirmed" in msg.lower():
             return False, {"message": "Please confirm your email address first (check your inbox)."}
         if "invalid" in msg.lower() or "credentials" in msg.lower() or "wrong" in msg.lower():
@@ -199,24 +206,17 @@ def auth_google_login_url() -> str:
     """
     Returns the Supabase Google OAuth redirect URL.
 
-    IMPORTANT — Flow type must be set to IMPLICIT in Supabase dashboard:
-      Authentication → Sign In / Providers → Scroll to bottom → Auth Flow Type → Implicit
+    With flow_type="implicit" set on the client (in _get_supabase),
+    Supabase returns #access_token=... in the URL fragment after Google
+    auth — no code exchange needed, no PKCE verifier needed.
 
-    Why Implicit and not PKCE:
-      PKCE requires a browser-generated code verifier that only Supabase JS can create.
-      Python has no access to it, so exchange_code_for_session always fails with
-      "both auth code and code verifier should be non-empty".
-      Implicit flow returns the token directly in the URL — Python can read it.
-
-    Required setup:
-      1. Supabase → Auth → Sign In / Providers → Auth Flow Type → "Implicit"  ← CRITICAL
-      2. Supabase → Auth → Providers → Google → Enable, paste Client ID + Secret
-      3. Supabase → Auth → URL Configuration
+    Required Supabase setup:
+      1. Auth → Providers → Google → Enable, add Client ID + Secret
+      2. Auth → URL Configuration:
            Site URL:      https://deploy-financial66.streamlit.app
            Redirect URLs: https://deploy-financial66.streamlit.app/**
-      4. Google Cloud Console → Credentials → OAuth 2.0 Client
-           Authorised redirect URIs:
-             https://<your-project-ref>.supabase.co/auth/v1/callback
+      3. Google Cloud Console → OAuth Client → Authorised redirect URIs:
+           https://<project-ref>.supabase.co/auth/v1/callback
     """
     supabase = _get_supabase()
     site_url = _get_site_url()
@@ -226,7 +226,6 @@ def auth_google_login_url() -> str:
         "options": {
             "redirect_to": site_url,
             "scopes":      "email profile",
-            # No query_params — they forced PKCE behaviour Python can't satisfy
         },
     })
 
@@ -241,23 +240,20 @@ def auth_google_login_url() -> str:
 
 def auth_handle_google_callback() -> bool:
     """
-    Handles Google OAuth callback after redirect.
+    Handles the Google OAuth callback.
 
-    Supabase Implicit flow puts the token in the URL FRAGMENT (#access_token=...).
-    URL fragments are NEVER sent to the server — Streamlit's st.query_params cannot
-    see them. So we inject a tiny JS snippet that reads window.location.hash, extracts
-    the access_token, and re-writes it as a real ?query_param so Streamlit can read it
-    on the next render cycle.
+    With implicit flow, Supabase redirects back with the token in the
+    URL *fragment* (#access_token=...). Browsers never send fragments to
+    the server, so Streamlit's st.query_params can't see them directly.
 
-    Flow:
-      1. Google redirects to app with #access_token=xxx in the fragment
-      2. JS reads the fragment and does location.replace("?access_token=xxx")
-      3. Streamlit re-renders, st.query_params now has access_token
-      4. Python reads it, calls get_user(), sets session, clears params
+    We use a small JS snippet (via st.markdown with an auto-executing
+    script tag) to read the fragment and push it into the URL as a real
+    query param (?access_token=...). On the next Streamlit rerender,
+    Python picks it up from st.query_params and completes the login.
     """
     params = st.query_params
 
-    # ── Step 1: Check for Supabase error in query params ────────
+    # Step 1: Supabase error came back as query param
     error = params.get("error")
     if error:
         desc = params.get("error_description", error)
@@ -265,8 +261,7 @@ def auth_handle_google_callback() -> bool:
         st.query_params.clear()
         return False
 
-    # ── Step 2: Implicit flow token arrived as ?access_token= ───
-    # (Set by our JS fragment-to-query bridge below on previous render)
+    # Step 2: JS bridge already ran on a previous render — token is now a query param
     token = params.get("access_token")
     if token:
         try:
@@ -287,35 +282,34 @@ def auth_handle_google_callback() -> bool:
             st.query_params.clear()
             return False
 
-    # ── Step 3: No token yet — inject JS to read URL fragment ───
-    # Supabase Implicit flow lands with #access_token=... in the hash.
-    # This JS reads it and converts it to a ?query_param so Streamlit sees it.
-    # Uses st.iframe with a data URI (st.components.v1.html removed after 2026-06-01)
-    js_code = """
+    # Step 3: No token yet — inject JS to read #fragment and convert to ?query_param.
+    # st.markdown executes script tags synchronously in the page context,
+    # so window.location refers directly to the parent page (not an iframe).
+    # This avoids st.components/st.iframe entirely.
+    st.markdown(
+        """
         <script>
         (function() {
-            var hash = window.parent.location.hash;
+            var hash = window.location.hash;
             if (!hash || hash.indexOf('access_token') === -1) return;
-
-            var fragmentParams = {};
+            var params = {};
             hash.substring(1).split('&').forEach(function(pair) {
-                var parts = pair.split('=');
-                if (parts.length === 2) {
-                    fragmentParams[decodeURIComponent(parts[0])] = decodeURIComponent(parts[1]);
+                var kv = pair.split('=');
+                if (kv.length === 2) {
+                    params[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1]);
                 }
             });
-
-            var token = fragmentParams['access_token'];
+            var token = params['access_token'];
             if (token) {
-                var newUrl = window.parent.location.pathname + '?access_token=' + encodeURIComponent(token);
-                window.parent.location.replace(newUrl);
+                window.location.replace(
+                    window.location.pathname + '?access_token=' + encodeURIComponent(token)
+                );
             }
         })();
         </script>
-    """
-    import base64
-    encoded = base64.b64encode(js_code.encode()).decode()
-    st.iframe(f"data:text/html;base64,{encoded}", height=1)
+        """,
+        unsafe_allow_html=True,
+    )
 
     return False
 
