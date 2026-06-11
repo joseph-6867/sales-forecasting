@@ -192,90 +192,71 @@ def _get_supabase_url() -> str:
         return os.environ.get("SUPABASE_URL", "")
 
 
+def _get_callback_url() -> str:
+    """
+    Returns the URL of oauth_callback.html — the intermediate page that
+    extracts the token from the URL fragment and forwards it to Streamlit.
+
+    For Streamlit Cloud, static files in /static/ are served at:
+      https://<app>.streamlit.app/app/static/<filename>
+
+    We serve oauth_callback.html from the /static/ folder.
+    """
+    try:
+        cb = st.secrets.get("OAUTH_CALLBACK_URL", "") or os.environ.get("OAUTH_CALLBACK_URL", "")
+    except Exception:
+        cb = os.environ.get("OAUTH_CALLBACK_URL", "")
+
+    if cb:
+        return cb
+
+    # Default: Streamlit Cloud serves files in /static/ at this path
+    base = _get_site_url().rstrip("/")
+    return f"{base}/app/static/oauth_callback.html"
+
+
 # ── Google OAuth ─────────────────────────────────────────────────
 
 def auth_google_login_url() -> str:
     """
-    Returns the Supabase Google OAuth URL (implicit flow).
-    Supabase redirects back with tokens in the URL fragment: #access_token=...
-    inject_fragment_listener() extracts them and forwards to Streamlit.
+    Builds the Supabase Google OAuth URL.
+
+    REDIRECT STRATEGY
+    -----------------
+    We redirect to oauth_callback.html (a static file in /static/).
+    That page runs in a real browser context (not an iframe), reads the
+    #access_token fragment, and redirects to the Streamlit app with
+    ?st_access_token=... as a query param that Python can read.
+
+    Why not redirect straight to the Streamlit app?
+      Streamlit renders inside an iframe on Streamlit Cloud.
+      st.components.v1.html() also renders in a nested iframe.
+      Neither can access or modify the top-level window.location.
+      A standalone HTML page has no such restriction.
     """
     import urllib.parse
 
-    supabase_url = _get_supabase_url().rstrip("/")
-    site_url     = _get_site_url()
+    supabase_url  = _get_supabase_url().rstrip("/")
+    callback_url  = _get_callback_url()
 
     params = urllib.parse.urlencode({
         "provider":    "google",
-        "redirect_to": site_url,
+        "redirect_to": callback_url,   # → oauth_callback.html, not Streamlit directly
         "scopes":      "email profile",
     })
 
     return f"{supabase_url}/auth/v1/authorize?{params}"
 
 
-def inject_fragment_listener():
-    """
-    Injects JavaScript that bridges the URL fragment → Streamlit query params.
-
-    The problem:
-      Supabase implicit flow puts the access token in the URL FRAGMENT
-      (e.g. https://app/#access_token=eyJ...). Fragments are never sent
-      to the server — they exist only in the browser. Streamlit's
-      st.query_params only sees ?key=value query params, never #fragments.
-
-    The fix:
-      This JS snippet runs in the browser, reads window.location.hash,
-      extracts access_token, and rewrites the URL to use ?st_access_token=
-      instead. That triggers a page reload with a query param Streamlit
-      CAN read. auth_handle_google_callback() then validates the token.
-
-    This is a no-op if there is no access_token in the fragment.
-    """
-    st.components.v1.html(
-        """
-        <script>
-        (function() {
-            var hash = window.location.hash;
-            if (!hash || hash.length < 2) return;
-
-            // Parse fragment as key=value pairs
-            var params = {};
-            hash.substring(1).split('&').forEach(function(part) {
-                var kv = part.split('=');
-                if (kv.length >= 2) {
-                    params[decodeURIComponent(kv[0])] = decodeURIComponent(kv.slice(1).join('='));
-                }
-            });
-
-            var accessToken = params['access_token'];
-            if (!accessToken) return;  // not an OAuth callback fragment
-
-            // Build query string Streamlit can read, then reload
-            var qs = '?st_access_token=' + encodeURIComponent(accessToken);
-            if (params['refresh_token']) {
-                qs += '&st_refresh_token=' + encodeURIComponent(params['refresh_token']);
-            }
-
-            // Replace current URL — removes the fragment, adds ?st_access_token=
-            // window.location.replace prevents a back-button loop
-            window.location.replace(window.location.pathname + qs);
-        })();
-        </script>
-        """,
-        height=0,
-    )
-
-
 def auth_handle_google_callback() -> bool:
     """
-    Reads ?st_access_token= (forwarded from the # fragment by inject_fragment_listener),
-    validates it against Supabase, and populates st.session_state.
+    Reads ?st_access_token= forwarded by oauth_callback.html,
+    validates with Supabase, sets session state.
     Returns True if a new session was established.
     """
     params = st.query_params
 
-    # Explicit OAuth error
+    # Explicit OAuth error forwarded by the callback page
     error = params.get("error")
     if error:
         desc = params.get("error_description", error)
@@ -283,7 +264,7 @@ def auth_handle_google_callback() -> bool:
         st.query_params.clear()
         return False
 
-    # Token forwarded from JS fragment bridge
+    # Token forwarded from oauth_callback.html
     access_token = params.get("st_access_token")
     if not access_token:
         return False
