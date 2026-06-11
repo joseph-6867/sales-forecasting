@@ -4,7 +4,6 @@
 
 import os
 import streamlit as st
-import streamlit.components.v1
 from supabase import create_client, Client
 
 
@@ -291,14 +290,13 @@ def auth_handle_google_callback() -> bool:
     # ── Step 3: No token yet — inject JS to read URL fragment ───
     # Supabase Implicit flow lands with #access_token=... in the hash.
     # This JS reads it and converts it to a ?query_param so Streamlit sees it.
-    st.components.v1.html(
-        """
+    # Uses st.iframe with a data URI (st.components.v1.html removed after 2026-06-01)
+    js_code = """
         <script>
         (function() {
-            var hash = window.location.hash;
+            var hash = window.parent.location.hash;
             if (!hash || hash.indexOf('access_token') === -1) return;
 
-            // Parse fragment params
             var fragmentParams = {};
             hash.substring(1).split('&').forEach(function(pair) {
                 var parts = pair.split('=');
@@ -309,16 +307,15 @@ def auth_handle_google_callback() -> bool:
 
             var token = fragmentParams['access_token'];
             if (token) {
-                // Replace URL: remove fragment, add token as query param
-                // Streamlit will re-render and Python will see st.query_params["access_token"]
-                var newUrl = window.location.pathname + '?access_token=' + encodeURIComponent(token);
-                window.location.replace(newUrl);
+                var newUrl = window.parent.location.pathname + '?access_token=' + encodeURIComponent(token);
+                window.parent.location.replace(newUrl);
             }
         })();
         </script>
-        """,
-        height=0,
-    )
+    """
+    import base64
+    encoded = base64.b64encode(js_code.encode()).decode()
+    st.iframe(f"data:text/html;base64,{encoded}", height=0)
 
     return False
 
