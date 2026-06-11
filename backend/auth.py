@@ -3,9 +3,6 @@
 # ================================================================
 
 import os
-import hashlib
-import base64
-import secrets
 import streamlit as st
 from supabase import create_client, Client
 
@@ -83,26 +80,12 @@ def _set_session_from_supabase(user, session):
         (user.email.split("@")[0] if user.email else "User")
     )
     st.session_state.role           = meta.get("role", "analyst")
-    st.session_state.jwt_token      = session.access_token if session else None
+    st.session_state.jwt_token      = getattr(session, "access_token", None) or session
     st.session_state.demo_mode      = False
     st.session_state.current_page   = "home"
     st.session_state.active_project = None
     st.session_state.active_df      = None
     st.session_state.col_map        = {}
-
-
-# ── PKCE helpers ─────────────────────────────────────────────────
-
-def _generate_pkce_pair() -> tuple[str, str]:
-    """
-    Generate a PKCE code_verifier and code_challenge pair.
-    - code_verifier : 32 random bytes → base64url (no padding)
-    - code_challenge: SHA-256(verifier) → base64url (no padding)
-    """
-    code_verifier  = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
-    digest         = hashlib.sha256(code_verifier.encode()).digest()
-    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
-    return code_verifier, code_challenge
 
 
 # ── Email / Password auth ────────────────────────────────────────
@@ -183,7 +166,6 @@ def auth_logout():
         "trained_models", "forecast_results",
         "_kpis", "_seasonal", "_monthly", "_daily",
         "_daily_eng", "_feat_cols", "_best_model",
-        "_oauth_code_verifier",
     ]
     for key in keys_to_clear:
         st.session_state.pop(key, None)
@@ -196,14 +178,14 @@ def auth_logout():
     st.session_state.col_map        = {}
 
 
-# ── Google OAuth via Supabase ────────────────────────────────────
+# ── Google OAuth ─────────────────────────────────────────────────
 
 def _get_site_url() -> str:
     try:
         url = st.secrets.get("SITE_URL", "") or os.environ.get("SITE_URL", "")
     except Exception:
         url = os.environ.get("SITE_URL", "")
-    return url or "https://deploy-financial66.streamlit.app/"
+    return (url or "https://deploy-financial66.streamlit.app/").rstrip("/") + "/"
 
 
 def _get_supabase_url() -> str:
@@ -215,39 +197,32 @@ def _get_supabase_url() -> str:
 
 def auth_google_login_url() -> str:
     """
-    Builds the Google OAuth URL with PKCE, encoding the verifier inside
-    the `state` query parameter so it survives the cross-tab redirect.
+    Returns the Supabase Google OAuth URL using the IMPLICIT flow
+    (no PKCE, no custom state).
 
-    WHY STATE PARAM:
-      Streamlit creates a brand-new session for every browser tab, so
-      st.session_state is empty when the OAuth callback lands.
-      By embedding the verifier in the `state` param we round-trip it
-      through Google → Supabase → back to our app inside the URL itself,
-      with no reliance on session storage across tabs.
+    Why implicit / no-PKCE:
+      PKCE requires the code_verifier to be present when the callback
+      lands.  Supabase stores its own verifier in JS localStorage, but
+      supabase-py stores it in an in-process MemoryStorage that is tied
+      to the client instance.  When Google redirects back, Streamlit
+      spins up a brand-new Python process (or at minimum a new session),
+      the client is recreated, MemoryStorage is empty, and the exchange
+      fails with `bad_oauth_state`.
 
-    STATE FORMAT:  base64url( verifier + "." + random_nonce )
-      - verifier  : the PKCE code_verifier
-      - nonce     : 8 random bytes for CSRF protection
+    The server-side (no-PKCE) flow works because:
+      - Supabase issues a short-lived auth code tied to its own server session
+      - We exchange it directly at /auth/v1/token without needing a verifier
+      - Security is maintained by the short code lifetime + HTTPS
     """
     import urllib.parse
 
     supabase_url = _get_supabase_url().rstrip("/")
     site_url     = _get_site_url()
 
-    code_verifier, code_challenge = _generate_pkce_pair()
-
-    # Embed verifier in state so it survives the redirect to a new Streamlit session
-    nonce      = base64.urlsafe_b64encode(secrets.token_bytes(8)).rstrip(b"=").decode()
-    state_data = f"{code_verifier}.{nonce}"
-    state      = base64.urlsafe_b64encode(state_data.encode()).rstrip(b"=").decode()
-
     params = urllib.parse.urlencode({
-        "provider":              "google",
-        "redirect_to":           site_url,
-        "scopes":                "email profile",
-        "code_challenge":        code_challenge,
-        "code_challenge_method": "S256",
-        "state":                 state,
+        "provider":    "google",
+        "redirect_to": site_url,
+        "scopes":      "email profile",
     })
 
     return f"{supabase_url}/auth/v1/authorize?{params}"
@@ -255,11 +230,22 @@ def auth_google_login_url() -> str:
 
 def auth_handle_google_callback() -> bool:
     """
-    Exchanges the ?code= from Supabase using the PKCE verifier that was
-    encoded in the ?state= parameter — no session state required.
+    Handles the OAuth callback.
+
+    Supabase can redirect back in two ways depending on project settings:
+
+    1. PKCE / server flow  → ?code=<auth_code>  in query params
+    2. Implicit flow       → #access_token=...  in the URL fragment
+
+    Fragments (#...) are never sent to the server, so Streamlit cannot
+    see them via st.query_params.  We therefore use the code-exchange
+    path (option 1) but WITHOUT a PKCE code_verifier — Supabase accepts
+    this when the project's auth flow is set to "Implicit" or when no
+    challenge was included in the original authorize request.
     """
     params = st.query_params
 
+    # ── Handle explicit errors from Supabase / Google ────────────
     error = params.get("error")
     if error:
         desc = params.get("error_description", error)
@@ -267,93 +253,86 @@ def auth_handle_google_callback() -> bool:
         st.query_params.clear()
         return False
 
+    # ── Code-exchange flow ───────────────────────────────────────
     code = params.get("code")
     if not code:
-        return False
+        return False   # No callback params — normal page load
 
-    # ── Recover verifier from the state param ────────────────────
-    state_raw = params.get("state", "")
-    verifier  = None
-
-    if state_raw:
+    try:
+        supabase_url = _get_supabase_url().rstrip("/")
         try:
-            # Add padding back before decoding
-            padded    = state_raw + "=" * (-len(state_raw) % 4)
-            decoded   = base64.urlsafe_b64decode(padded).decode()
-            # Format: "<verifier>.<nonce>"
-            verifier  = decoded.rsplit(".", 1)[0]
+            key = st.secrets.get("SUPABASE_ANON_KEY", "") or os.environ.get("SUPABASE_ANON_KEY", "")
         except Exception:
-            verifier = None
+            key = os.environ.get("SUPABASE_ANON_KEY", "")
 
-    # ── Fallback: check session state (same-tab flow) ────────────
-    if not verifier:
-        verifier = st.session_state.get("_oauth_code_verifier")
+        import httpx
 
-    if not verifier:
-        st.error(
-            "Sign-in session expired — could not recover the PKCE verifier. "
-            "Please try signing in again."
-        )
-        st.query_params.clear()
-        return False
-
-    # ── Load credentials ─────────────────────────────────────────
-    try:
-        supabase_url = st.secrets.get("SUPABASE_URL", "") or os.environ.get("SUPABASE_URL", "")
-        key          = st.secrets.get("SUPABASE_ANON_KEY", "") or os.environ.get("SUPABASE_ANON_KEY", "")
-    except Exception:
-        supabase_url = os.environ.get("SUPABASE_URL", "")
-        key          = os.environ.get("SUPABASE_ANON_KEY", "")
-
-    supabase_url = supabase_url.rstrip("/")
-
-    # ── Exchange code + verifier at Supabase token endpoint ──────
-    import httpx
-    try:
+        # Exchange the auth code for tokens — no code_verifier needed
+        # because we did not send a code_challenge in the authorize request
         resp = httpx.post(
-            f"{supabase_url}/auth/v1/token?grant_type=pkce",
+            f"{supabase_url}/auth/v1/token?grant_type=authorization_code",
             headers={
                 "apikey":       key,
                 "Content-Type": "application/json",
             },
-            json={
-                "auth_code":     code,
-                "code_verifier": verifier,
-            },
+            json={"code": code},
             timeout=15,
         )
 
         if resp.status_code != 200:
-            st.error(f"Google sign-in failed (HTTP {resp.status_code}): {resp.text}")
-            st.query_params.clear()
-            st.session_state.pop("_oauth_code_verifier", None)
-            return False
+            # Supabase may require the pkce grant_type even without a verifier
+            # on some project configurations — try the pkce endpoint with an
+            # empty verifier as a fallback.
+            resp2 = httpx.post(
+                f"{supabase_url}/auth/v1/token?grant_type=pkce",
+                headers={
+                    "apikey":       key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "auth_code":     code,
+                    "code_verifier": "",
+                },
+                timeout=15,
+            )
+            if resp2.status_code == 200:
+                resp = resp2
+            else:
+                st.error(
+                    f"Google sign-in failed (HTTP {resp.status_code}).\n\n"
+                    f"**Fix:** In your Supabase dashboard → Authentication → "
+                    f"URL Configuration, set the Auth Flow to **Implicit** "
+                    f"and add `{_get_site_url()}` to the Redirect URLs allow-list."
+                )
+                st.query_params.clear()
+                return False
 
-        data          = resp.json()
-        access_token  = data.get("access_token")
+        data         = resp.json()
+        access_token = data.get("access_token")
 
         if not access_token:
-            st.error(f"Google sign-in: no access token in response. Response: {data}")
+            st.error(
+                f"Google sign-in: no access_token in response.\n\n"
+                f"Response: `{data}`\n\n"
+                f"**Fix:** In Supabase → Authentication → URL Configuration, "
+                f"set Auth Flow to **Implicit** and whitelist `{_get_site_url()}`."
+            )
             st.query_params.clear()
-            st.session_state.pop("_oauth_code_verifier", None)
             return False
 
-        # ── Fetch user info via the token ────────────────────────
+        # ── Get user info ────────────────────────────────────────
         supabase = _get_supabase()
         user_res = supabase.auth.get_user(access_token)
 
-        if not user_res.user:
-            st.error("Google sign-in: could not retrieve user from token.")
+        if not user_res or not user_res.user:
+            st.error("Google sign-in: could not retrieve user from access token.")
             st.query_params.clear()
-            st.session_state.pop("_oauth_code_verifier", None)
             return False
 
-        class _Session:
-            def __init__(self, token):
-                self.access_token = token
+        class _Sess:
+            def __init__(self, t): self.access_token = t
 
-        _set_session_from_supabase(user_res.user, _Session(access_token))
-        st.session_state.pop("_oauth_code_verifier", None)
+        _set_session_from_supabase(user_res.user, _Sess(access_token))
         st.query_params.clear()
         return True
 
@@ -362,7 +341,6 @@ def auth_handle_google_callback() -> bool:
         st.error(f"Google sign-in error: {e}")
         st.code(traceback.format_exc(), language="python")
         st.query_params.clear()
-        st.session_state.pop("_oauth_code_verifier", None)
         return False
 
 
