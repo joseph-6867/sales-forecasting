@@ -65,12 +65,7 @@ init_session()
 def _google_button(label: str):
     """
     Renders the Google OAuth button using st.link_button (Streamlit >= 1.27).
-    This avoids raw HTML f-string injection which caused the
-    '{google_url}' literal bug (URL-encoded as %7Bgoogle_url%7D).
-
     Falls back to a safe HTML anchor for older Streamlit versions.
-    Any error from auth_google_login_url() is shown visibly so you
-    can diagnose missing secrets or Supabase config issues.
     """
     try:
         google_url = auth_google_login_url()
@@ -82,12 +77,9 @@ def _google_button(label: str):
         )
         return
 
-    # st.link_button: available Streamlit >= 1.27 — safest approach,
-    # no HTML injection possible.
     try:
         st.link_button(f"🔵  {label}", url=google_url, use_container_width=True)
     except AttributeError:
-        # Older Streamlit fallback — HTML-escape the URL before embedding
         import html as _html
         safe_url = _html.escape(google_url, quote=True)
         st.markdown(
@@ -229,7 +221,13 @@ def _auth_page():
                     msg = result["message"] if isinstance(result, dict) else result
                     if ok:
                         st.success(msg)
-                        st.rerun()
+                        # ✅ BUG 2 FIX: Only rerun (auto-login) if session was created.
+                        # With email confirmation OFF, auto_login=True and session is set.
+                        # With email confirmation ON,  auto_login=False — show the message
+                        # and stay on the page so user can go confirm their email first.
+                        if result.get("auto_login", False):
+                            st.rerun()
+                        # else: stay on page, success message already shown above
                     else:
                         st.error(msg)
 
