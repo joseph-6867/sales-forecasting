@@ -24,18 +24,7 @@ def _get_supabase() -> Client:
             'SUPABASE_URL = "https://..."\n'
             'SUPABASE_ANON_KEY = "eyJ..."'
         )
-
-    # ✅ KEY FIX: flow_type="implicit" tells supabase-py NOT to generate a
-    # PKCE code verifier. Without this, the Python client defaults to PKCE,
-    # which needs a browser-side verifier Python can never provide — causing
-    # "both auth code and code verifier should be non-empty" error.
-    # There is NO dashboard toggle; this must be set in the client options.
-    try:
-        from supabase.lib.client_options import ClientOptions
-        return create_client(url, key, options=ClientOptions(flow_type="implicit"))
-    except Exception:
-        # Fallback for older supabase-py versions that don't support flow_type
-        return create_client(url, key)
+    return create_client(url, key)
 
 
 # ── Session initialisation ───────────────────────────────────────
@@ -115,10 +104,7 @@ def auth_register(email: str, password: str, full_name: str, role: str = "analys
                 return True, {"message": "Account created successfully! Welcome 🎉", "auto_login": True}
             else:
                 return True, {
-                    "message": (
-                        "✅ Account created! Check your email to confirm your address, "
-                        "then log in here."
-                    ),
+                    "message": "✅ Account created! Check your email to confirm, then log in.",
                     "auto_login": False,
                 }
         return False, {"message": "Registration failed. Please try again.", "auto_login": False}
@@ -180,6 +166,7 @@ def auth_logout():
         "trained_models", "forecast_results",
         "_kpis", "_seasonal", "_monthly", "_daily",
         "_daily_eng", "_feat_cols", "_best_model",
+        "_oauth_code_verifier",
     ]
     for key in keys_to_clear:
         st.session_state.pop(key, None)
@@ -204,11 +191,15 @@ def _get_site_url() -> str:
 
 def auth_google_login_url() -> str:
     """
-    Returns the Supabase Google OAuth redirect URL.
+    Generates Google OAuth URL using PKCE flow.
 
-    With flow_type="implicit" set on the client (in _get_supabase),
-    Supabase returns #access_token=... in the URL fragment after Google
-    auth — no code exchange needed, no PKCE verifier needed.
+    supabase-py always uses PKCE. When sign_in_with_oauth() is called,
+    the Python client generates a code_verifier internally and embeds
+    the matching code_challenge in the OAuth URL.
+
+    The verifier is stored in st.session_state["_oauth_code_verifier"]
+    so auth_handle_google_callback() can use it to exchange the ?code=
+    for a real session via exchange_code_for_session().
 
     Required Supabase setup:
       1. Auth → Providers → Google → Enable, add Client ID + Secret
@@ -235,25 +226,64 @@ def auth_google_login_url() -> str:
             "Check that Google provider is enabled in Supabase → Auth → Providers."
         )
 
+    # Save the PKCE code verifier that supabase-py generated internally.
+    # We must pass it back when exchanging the ?code= for a session.
+    # It lives on the supabase.auth._storage or in the response object.
+    _save_pkce_verifier(supabase)
+
     return res.url
+
+
+def _save_pkce_verifier(supabase):
+    """
+    Extracts the PKCE code verifier from the supabase-py auth client
+    and stores it in session_state for use during callback.
+
+    supabase-py stores the verifier in its internal async/sync storage.
+    We reach into it here so Python can complete the code exchange.
+    """
+    try:
+        # supabase-py stores PKCE state in auth._storage (SyncMemoryStorage)
+        storage = supabase.auth._storage
+        # The key used internally by gotrue-py
+        for key in ["supabase.auth.code_verifier", "code_verifier", "pkce_code_verifier"]:
+            try:
+                verifier = storage.get_item(key)
+                if verifier:
+                    st.session_state["_oauth_code_verifier"] = verifier
+                    return
+            except Exception:
+                continue
+
+        # Fallback: iterate all storage keys
+        try:
+            items = storage._storage if hasattr(storage, "_storage") else {}
+            for k, v in items.items():
+                if "verifier" in k.lower() or "pkce" in k.lower():
+                    st.session_state["_oauth_code_verifier"] = v
+                    return
+        except Exception:
+            pass
+
+    except Exception:
+        pass
 
 
 def auth_handle_google_callback() -> bool:
     """
-    Handles the Google OAuth callback.
+    Handles the ?code= callback from Supabase after Google OAuth.
 
-    With implicit flow, Supabase redirects back with the token in the
-    URL *fragment* (#access_token=...). Browsers never send fragments to
-    the server, so Streamlit's st.query_params can't see them directly.
-
-    We use a small JS snippet (via st.markdown with an auto-executing
-    script tag) to read the fragment and push it into the URL as a real
-    query param (?access_token=...). On the next Streamlit rerender,
-    Python picks it up from st.query_params and completes the login.
+    PKCE flow:
+      1. User clicks Google button → auth_google_login_url() generates URL
+         + stores code_verifier in session_state
+      2. Google auth → Supabase → redirects to app with ?code=xxx
+      3. This function reads ?code= and the saved verifier, calls
+         exchange_code_for_session() to get a real session
+      4. Sets authenticated state, clears query params, returns True
     """
     params = st.query_params
 
-    # Step 1: Supabase error came back as query param
+    # Supabase error
     error = params.get("error")
     if error:
         desc = params.get("error_description", error)
@@ -261,55 +291,55 @@ def auth_handle_google_callback() -> bool:
         st.query_params.clear()
         return False
 
-    # Step 2: JS bridge already ran on a previous render — token is now a query param
-    token = params.get("access_token")
-    if token:
+    # PKCE code arrived
+    code = params.get("code")
+    if code:
         try:
             supabase = _get_supabase()
-            res = supabase.auth.get_user(token)
-            if res.user:
-                class _FakeSession:
-                    access_token = token
-                _set_session_from_supabase(res.user, _FakeSession())
+
+            # Restore the code verifier into the supabase-py storage
+            # so exchange_code_for_session can find it
+            verifier = st.session_state.get("_oauth_code_verifier")
+            if verifier:
+                try:
+                    storage = supabase.auth._storage
+                    for key in ["supabase.auth.code_verifier", "code_verifier", "pkce_code_verifier"]:
+                        try:
+                            storage.set_item(key, verifier)
+                        except Exception:
+                            pass
+                    # Also try _storage dict directly
+                    if hasattr(storage, "_storage"):
+                        storage._storage["supabase.auth.code_verifier"] = verifier
+                        storage._storage["code_verifier"] = verifier
+                except Exception:
+                    pass
+
+            res = supabase.auth.exchange_code_for_session({"auth_code": code})
+
+            if res.user and res.session:
+                _set_session_from_supabase(res.user, res.session)
+                st.session_state.pop("_oauth_code_verifier", None)
                 st.query_params.clear()
                 return True
             else:
-                st.error("Google sign-in: could not verify token. Please try again.")
+                st.error("Google sign-in: could not complete sign-in. Please try again.")
                 st.query_params.clear()
                 return False
-        except Exception as e:
-            st.error(f"Google sign-in error: {e}")
-            st.query_params.clear()
-            return False
 
-    # Step 3: No token yet — inject JS to read #fragment and convert to ?query_param.
-    # st.markdown executes script tags synchronously in the page context,
-    # so window.location refers directly to the parent page (not an iframe).
-    # This avoids st.components/st.iframe entirely.
-    st.markdown(
-        """
-        <script>
-        (function() {
-            var hash = window.location.hash;
-            if (!hash || hash.indexOf('access_token') === -1) return;
-            var params = {};
-            hash.substring(1).split('&').forEach(function(pair) {
-                var kv = pair.split('=');
-                if (kv.length === 2) {
-                    params[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1]);
-                }
-            });
-            var token = params['access_token'];
-            if (token) {
-                window.location.replace(
-                    window.location.pathname + '?access_token=' + encodeURIComponent(token)
-                );
-            }
-        })();
-        </script>
-        """,
-        unsafe_allow_html=True,
-    )
+        except Exception as e:
+            err = str(e)
+            # If verifier still missing, show a clear message
+            if "verifier" in err.lower() or "code" in err.lower():
+                st.error(
+                    "Google sign-in failed: session expired during redirect. "
+                    "Please try signing in again."
+                )
+            else:
+                st.error(f"Google sign-in error: {e}")
+            st.query_params.clear()
+            st.session_state.pop("_oauth_code_verifier", None)
+            return False
 
     return False
 
