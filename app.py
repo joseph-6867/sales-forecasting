@@ -24,7 +24,7 @@ _DEFAULTS = {
     "jwt_token":         None,
     "demo_mode":         False,
     "current_page":      "home",
-    # Dashboard keys
+    # Dashboard keys not in init_session()
     "active_project":    None,
     "active_df":         None,
     "col_map":           {},
@@ -57,13 +57,15 @@ from frontend.dashboard import render_dashboard
 
 init_session()
 
+
 # ================================================================
 # GOOGLE BUTTON HELPER
 # ================================================================
 
 def _google_button(label: str):
     """
-    Renders the Google OAuth button using st.link_button.
+    Renders the Google OAuth button using st.link_button (Streamlit >= 1.27).
+    Falls back to a safe HTML anchor for older Streamlit versions.
     """
     try:
         google_url = auth_google_login_url()
@@ -94,6 +96,7 @@ def _google_button(label: str):
             f'</svg>{label}</div></a>',
             unsafe_allow_html=True,
         )
+
 
 # ================================================================
 # AUTH PAGE
@@ -218,8 +221,13 @@ def _auth_page():
                     msg = result["message"] if isinstance(result, dict) else result
                     if ok:
                         st.success(msg)
+                        # ✅ BUG 2 FIX: Only rerun (auto-login) if session was created.
+                        # With email confirmation OFF, auto_login=True and session is set.
+                        # With email confirmation ON,  auto_login=False — show the message
+                        # and stay on the page so user can go confirm their email first.
                         if result.get("auto_login", False):
                             st.rerun()
+                        # else: stay on page, success message already shown above
                     else:
                         st.error(msg)
 
@@ -234,12 +242,12 @@ def _auth_page():
                 if not fp_email:
                     st.error("Please enter your email address.")
                 else:
-                    with st.spinner("Processing..."):
-                        ok, msg = auth_forgot_password(fp_email)
+                    ok, msg = auth_forgot_password(fp_email)
                     if ok:
                         st.success(msg)
                     else:
                         st.error(msg)
+
 
 # ================================================================
 # ROUTER
@@ -251,5 +259,8 @@ def main():
     else:
         _auth_page()
 
+
 if __name__ == "__main__":
+    main()
+else:
     main()
