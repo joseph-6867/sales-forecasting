@@ -53,9 +53,10 @@ def _google_button(label: str):
 
 
 def _auth_page():
-    # ── Handle Google callback (?st_access_token= or ?code=) ─────
-    # oauth_callback.html forwards the token as a query param.
-    # This MUST run first, before any UI renders.
+    # ── Handle Google OAuth callback ──────────────────────────────
+    # auth_handle_google_callback() also injects the JS fragment handler,
+    # which converts #access_token= in the URL to ?st_access_token= so
+    # Streamlit can read it. This MUST run before any other UI.
     if auth_handle_google_callback():
         st.rerun()
 
