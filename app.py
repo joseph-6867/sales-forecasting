@@ -24,7 +24,7 @@ _DEFAULTS = {
     "jwt_token":         None,
     "demo_mode":         False,
     "current_page":      "home",
-    # Dashboard keys not in init_session()
+    # Dashboard keys
     "active_project":    None,
     "active_df":         None,
     "col_map":           {},
@@ -57,21 +57,13 @@ from frontend.dashboard import render_dashboard
 
 init_session()
 
-
 # ================================================================
 # GOOGLE BUTTON HELPER
 # ================================================================
+
 def _google_button(label: str):
     """
-    Always open Google OAuth in the SAME browser tab.
-
-    Why:
-      st.link_button may open a fresh browser context/tab depending on
-      Streamlit/browser behavior. That can result in a different
-      Streamlit session where st.session_state is empty.
-
-      Using a plain HTML anchor with target="_self" guarantees the
-      OAuth flow stays in the current tab.
+    Renders the Google OAuth button using st.link_button.
     """
     try:
         google_url = auth_google_login_url()
@@ -83,48 +75,26 @@ def _google_button(label: str):
         )
         return
 
-    import html as _html
+    try:
+        st.link_button(f"🔵  {label}", url=google_url, use_container_width=True)
+    except AttributeError:
+        import html as _html
+        safe_url = _html.escape(google_url, quote=True)
+        st.markdown(
+            f'<a href="{safe_url}" target="_self" style="text-decoration:none;display:block">'
+            f'<div style="display:flex;align-items:center;justify-content:center;gap:10px;'
+            f'background:#fff;border:1px solid #dadce0;border-radius:6px;padding:10px 16px;'
+            f'font-family:sans-serif;font-size:15px;font-weight:500;color:#3c4043;'
+            f'box-shadow:0 1px 2px rgba(0,0,0,.08)">'
+            f'<svg width="18" height="18" viewBox="0 0 48 48">'
+            f'<path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>'
+            f'<path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>'
+            f'<path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>'
+            f'<path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.35-8.16 2.35-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>'
+            f'</svg>{label}</div></a>',
+            unsafe_allow_html=True,
+        )
 
-    safe_url = _html.escape(google_url, quote=True)
-
-    st.markdown(
-        """
-        <a href="{safe_url}" target="_self"
-           style="text-decoration:none;display:block;width:100%;">
-            <div style="
-                display:flex;
-                align-items:center;
-                justify-content:center;
-                gap:10px;
-                background:#ffffff;
-                border:1px solid #dadce0;
-                border-radius:6px;
-                padding:10px 16px;
-                font-family:sans-serif;
-                font-size:15px;
-                font-weight:500;
-                color:#3c4043;
-                box-shadow:0 1px 2px rgba(0,0,0,.08);
-                cursor:pointer;
-                width:100%;
-                box-sizing:border-box;
-            ">
-                <svg width="18" height="18" viewBox="0 0 48 48">
-                    <path fill="#EA4335"
-                          d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
-                    <path fill="#4285F4"
-                          d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
-                    <path fill="#FBBC05"
-                          d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
-                    <path fill="#34A853"
-                          d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.35-8.16 2.35-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
-                </svg>
-                {label}
-            </div>
-        </a>
-        """,
-        unsafe_allow_html=True,
-    )
 # ================================================================
 # AUTH PAGE
 # ================================================================
@@ -248,13 +218,8 @@ def _auth_page():
                     msg = result["message"] if isinstance(result, dict) else result
                     if ok:
                         st.success(msg)
-                        # ✅ BUG 2 FIX: Only rerun (auto-login) if session was created.
-                        # With email confirmation OFF, auto_login=True and session is set.
-                        # With email confirmation ON,  auto_login=False — show the message
-                        # and stay on the page so user can go confirm their email first.
                         if result.get("auto_login", False):
                             st.rerun()
-                        # else: stay on page, success message already shown above
                     else:
                         st.error(msg)
 
@@ -269,12 +234,12 @@ def _auth_page():
                 if not fp_email:
                     st.error("Please enter your email address.")
                 else:
-                    ok, msg = auth_forgot_password(fp_email)
+                    with st.spinner("Processing..."):
+                        ok, msg = auth_forgot_password(fp_email)
                     if ok:
                         st.success(msg)
                     else:
                         st.error(msg)
-
 
 # ================================================================
 # ROUTER
@@ -286,8 +251,5 @@ def main():
     else:
         _auth_page()
 
-
 if __name__ == "__main__":
-    main()
-else:
     main()
