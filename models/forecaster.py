@@ -119,7 +119,7 @@ def select_best_model(results):
     Pick the model with the lowest RMSE.
     Returns model_name string.
     """
-    if not results: return None
+    if results is None or len(results) == 0: return None
     return min(results.keys(), key=lambda k: results[k]["metrics"]["rmse"])
 
 

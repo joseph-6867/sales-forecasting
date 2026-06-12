@@ -144,7 +144,7 @@ def generate_pdf_report(project_name, kpis, monthly_df,
         story.append(Spacer(1, 0.3*inch))
 
     # ── Model Metrics ──────────────────────────────────────
-    if model_metrics:
+    if model_metrics is not None and len(model_metrics) > 0:
         story.append(Paragraph("Model Performance Metrics", cs["H1"]))
         story.append(Spacer(1, 0.1*inch))
         m_rows = [["Model", "MAE", "RMSE", "R²", "MAPE"]]
@@ -251,9 +251,9 @@ def generate_excel_report(project_name, kpis, monthly_df,
             fdf.to_excel(writer, sheet_name="Forecast", index=False)
 
         # ── Sheet 5: Model Metrics ────────────────────────
-        if model_metrics:
-            pd.DataFrame(model_metrics).to_excel(
-                writer, sheet_name="Model Metrics", index=False
-            )
+            if model_metrics is not None and len(model_metrics) > 0:
+                pd.DataFrame(model_metrics).to_excel(
+                    writer, sheet_name="Model Metrics", index=False
+                )
 
     return buf.getvalue()

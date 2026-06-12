@@ -666,7 +666,7 @@ def _page_forecasting():
     results   = st.session_state.get("trained_models", {})
     best_name = st.session_state.get("_best_model")
 
-    if not results:
+    if results is None or len(results) == 0:
         st.info("Click **Train Models** to begin.")
         return
 
@@ -932,7 +932,7 @@ def _page_scenario():
     )
 
     forecast_results = st.session_state.get("forecast_results", {})
-    if not forecast_results:
+    if forecast_results is None or len(forecast_results) == 0:
         st.warning("No forecast available. Run the Forecasting module first.")
         if st.button("Go to Forecasting"):
             st.session_state.current_page = "forecasting"
@@ -1011,7 +1011,7 @@ def _page_reports():
         monthly  = st.session_state.get("_monthly")
         seasonal = st.session_state.get("_seasonal", {})
 
-        if kpis and seasonal:
+        if _is_nonempty(kpis) and _is_nonempty(seasonal):
             insights = generate_insights(df, date_col, sales_col, kpis, seasonal)
             recs     = generate_recommendations(kpis, seasonal, None, None)
         elif date_col and sales_col:
@@ -1024,10 +1024,10 @@ def _page_reports():
             insights, recs = [], []
 
         forecast_results = st.session_state.get("forecast_results", {})
-        forecast_df      = list(forecast_results.values())[0] if forecast_results else None
+        forecast_df = list(forecast_results.values())[0] if forecast_results is not None and len(forecast_results) > 0 else None
 
-        metrics      = st.session_state.get("trained_models")
-        metrics_list = [{"model_name": n, **r["metrics"]} for n, r in metrics.items()] if metrics else None
+        metrics = st.session_state.get("trained_models")
+        metrics_list = [{"model_name": n, **r["metrics"]} for n, r in metrics.items()] if metrics is not None and len(metrics) > 0 else None
 
         r1, r2, r3 = st.columns(3)
 
@@ -1197,3 +1197,23 @@ def _get_df_or_warn(silent=False):
                 st.rerun()
         return None, None
     return df, col_map
+
+
+def _is_nonempty(o):
+    """Return True if object is not None and not empty (handles pandas objects safely)."""
+    if o is None:
+        return False
+    # pandas DataFrame/Series have .empty
+    if hasattr(o, "empty"):
+        try:
+            return not o.empty
+        except Exception:
+            pass
+    # Generic sized containers
+    if hasattr(o, "__len__"):
+        try:
+            return len(o) > 0
+        except Exception:
+            pass
+    # Fallback: presume non-None, non-sized objects are non-empty
+    return True

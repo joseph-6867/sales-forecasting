@@ -263,7 +263,7 @@ def model_comparison_chart(metrics_list, metric="rmse"):
     """
     metrics_list: list of {model_name, mae, rmse, r2, mape}
     """
-    if not metrics_list: return _empty()
+    if metrics_list is None or len(metrics_list) == 0: return _empty()
     df = pd.DataFrame(metrics_list)
     f  = _fig(f"Model Comparison — {metric.upper()}", height=320)
     best_idx = df[metric].idxmin() if metric != "r2" else df[metric].idxmax()
