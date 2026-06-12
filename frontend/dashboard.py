@@ -725,10 +725,14 @@ def _page_forecasting():
         horizon_days = FORECAST_HORIZONS[horizon_name]
         with st.spinner(f"Forecasting {horizon_days} days…"):
             try:
-                daily_eng = st.session_state.get("_daily_eng") or engineer_features(df, date_col, sales_col)
+                daily_eng = st.session_state.get("_daily_eng")
+                if daily_eng is None:
+                    daily_eng = engineer_features(df, date_col, sales_col)
                 fc_df     = generate_forecast(daily_eng, date_col, results[model_sel], horizon_days)
 
-                forecast_results = st.session_state.get("forecast_results") or {}
+                forecast_results = st.session_state.get("forecast_results")
+                if forecast_results is None:
+                    forecast_results = {}
                 forecast_results[horizon_name] = fc_df
                 st.session_state.forecast_results = forecast_results
 
@@ -892,10 +896,14 @@ def _page_insights():
     product_col = col_map.get("product")
     region_col  = col_map.get("region")
 
-    kpis = st.session_state.get("_kpis") or compute_kpis(df, date_col, sales_col)
+    kpis = st.session_state.get("_kpis")
+    if kpis is None:
+        kpis = compute_kpis(df, date_col, sales_col)
     st.session_state["_kpis"] = kpis
 
-    seasonal = st.session_state.get("_seasonal") or seasonal_analysis(df, date_col, sales_col)
+    seasonal = st.session_state.get("_seasonal")
+    if seasonal is None:
+        seasonal = seasonal_analysis(df, date_col, sales_col)
     st.session_state["_seasonal"] = seasonal
 
     product_res = product_analysis(df, date_col, sales_col, product_col) if product_col else None
